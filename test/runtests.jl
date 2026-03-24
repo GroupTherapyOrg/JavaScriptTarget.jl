@@ -1080,4 +1080,141 @@ process.stdout.write(String(f_isempty("hello")));
             @test count(';', mappings.captures[1]) == 2
         end
     end
+
+    @testset "RT-002: Base function coverage" begin
+        # --- Math functions (should map to Math.*) ---
+        @testset "Math functions" begin
+            f_sin(x::Float64) = sin(x)
+            @test parse(Float64, compile_and_run(f_sin, (Float64,), 0.0)) ≈ 0.0
+            @test parse(Float64, compile_and_run(f_sin, (Float64,), 1.0)) ≈ sin(1.0) atol=1e-10
+
+            f_cos(x::Float64) = cos(x)
+            @test parse(Float64, compile_and_run(f_cos, (Float64,), 0.0)) ≈ 1.0
+
+            f_exp(x::Float64) = exp(x)
+            @test parse(Float64, compile_and_run(f_exp, (Float64,), 0.0)) ≈ 1.0
+
+            f_log(x::Float64) = log(x)
+            @test parse(Float64, compile_and_run(f_log, (Float64,), 1.0)) ≈ 0.0
+
+            f_sqrt(x::Float64) = sqrt(x)
+            @test parse(Float64, compile_and_run(f_sqrt, (Float64,), 4.0)) ≈ 2.0
+
+            f_floor(x::Float64) = floor(x)
+            @test compile_and_run(f_floor, (Float64,), 3.7) == "3"
+
+            f_ceil(x::Float64) = ceil(x)
+            @test compile_and_run(f_ceil, (Float64,), 3.2) == "4"
+
+            f_round(x::Float64) = round(x)
+            @test compile_and_run(f_round, (Float64,), 3.5) == "4"
+
+            f_trunc(x::Float64) = trunc(x)
+            @test compile_and_run(f_trunc, (Float64,), 3.7) == "3"
+
+            f_sign(x::Float64) = sign(x)
+            @test compile_and_run(f_sign, (Float64,), -3.14) == "-1"
+        end
+
+        # --- Integer math (inlined to intrinsics) ---
+        @testset "Integer math" begin
+            f_div_i(a::Int32, b::Int32) = div(a, b)
+            @test compile_and_run(f_div_i, (Int32, Int32), Int32(7), Int32(2)) == "3"
+            @test compile_and_run(f_div_i, (Int32, Int32), Int32(-7), Int32(2)) == "-3"
+
+            f_mod_i(a::Int32, b::Int32) = mod(a, b)
+            @test compile_and_run(f_mod_i, (Int32, Int32), Int32(7), Int32(3)) == "1"
+            @test compile_and_run(f_mod_i, (Int32, Int32), Int32(-7), Int32(3)) == "2"
+
+            f_fld_i(a::Int32, b::Int32) = fld(a, b)
+            @test compile_and_run(f_fld_i, (Int32, Int32), Int32(-7), Int32(2)) == "-4"
+
+            f_cld_i(a::Int32, b::Int32) = cld(a, b)
+            @test compile_and_run(f_cld_i, (Int32, Int32), Int32(7), Int32(2)) == "4"
+        end
+
+        # --- Type conversions ---
+        @testset "Type conversions" begin
+            f_i2f(x::Int32) = Float64(x)
+            @test compile_and_run(f_i2f, (Int32,), Int32(42)) == "42"
+
+            f_f2i(x::Float64) = unsafe_trunc(Int32, x)
+            @test compile_and_run(f_f2i, (Float64,), 3.7) == "3"
+            @test compile_and_run(f_f2i, (Float64,), -2.1) == "-2"
+        end
+
+        # --- String functions ---
+        @testset "String operations" begin
+            f_strlen(s::String) = isempty(s)
+            @test compile_and_run(f_strlen, (String,), "") == "true"
+            @test compile_and_run(f_strlen, (String,), "hello") == "false"
+
+            f_strcat(a::String, b::String) = string(a, b)
+            @test compile_and_run(f_strcat, (String, String), "foo", "bar") == "foobar"
+
+            f_strrep(s::String, n::Int32) = s ^ n
+            @test compile_and_run(f_strrep, (String, Int32), "ab", Int32(3)) == "ababab"
+
+            f_interp(name::String) = "Hello $(name)!"
+            @test compile_and_run(f_interp, (String,), "World") == "Hello World!"
+        end
+
+        # --- Comparison (already tested inline in earlier tests, verify via named functions) ---
+        @testset "Comparisons" begin
+            f_eq(a::Int32, b::Int32) = a == b
+            @test compile_and_run(f_eq, (Int32, Int32), Int32(5), Int32(5)) == "true"
+            @test compile_and_run(f_eq, (Int32, Int32), Int32(5), Int32(3)) == "false"
+
+            f_lt(a::Int32, b::Int32) = a < b
+            @test compile_and_run(f_lt, (Int32, Int32), Int32(3), Int32(5)) == "true"
+            @test compile_and_run(f_lt, (Int32, Int32), Int32(5), Int32(3)) == "false"
+
+            f_ge(a::Float64, b::Float64) = a >= b
+            @test compile_and_run(f_ge, (Float64, Float64), 5.0, 5.0) == "true"
+            @test compile_and_run(f_ge, (Float64, Float64), 3.0, 5.0) == "false"
+        end
+
+        # --- Boolean operations ---
+        @testset "Boolean operations" begin
+            f_not(x::Bool) = !x
+            @test compile_and_run(f_not, (Bool,), true) == "false"
+            @test compile_and_run(f_not, (Bool,), false) == "true"
+
+            # Short-circuit && and || (already tested in CF-003)
+            function f_sc_and(a::Bool, b::Bool)::Bool
+                return a && b
+            end
+            @test compile_and_run(f_sc_and, (Bool, Bool), true, true) == "true"
+            @test compile_and_run(f_sc_and, (Bool, Bool), true, false) == "false"
+        end
+
+        # --- Bitwise operations ---
+        @testset "Bitwise operations" begin
+            f_band(a::Int32, b::Int32) = a & b
+            @test compile_and_run(f_band, (Int32, Int32), Int32(0b1100), Int32(0b1010)) == "8"
+
+            f_bor(a::Int32, b::Int32) = a | b
+            @test compile_and_run(f_bor, (Int32, Int32), Int32(0b1100), Int32(0b1010)) == "14"
+
+            f_bxor(a::Int32, b::Int32) = xor(a, b)
+            @test compile_and_run(f_bxor, (Int32, Int32), Int32(0b1100), Int32(0b1010)) == "6"
+        end
+
+        # --- Composite functions (real-world patterns) ---
+        @testset "Composite patterns" begin
+            # Euclidean distance
+            function f_distance(x1::Float64, y1::Float64, x2::Float64, y2::Float64)::Float64
+                dx = x2 - x1
+                dy = y2 - y1
+                return sqrt(dx * dx + dy * dy)
+            end
+            @test parse(Float64, compile_and_run(f_distance, (Float64, Float64, Float64, Float64), 0.0, 0.0, 3.0, 4.0)) ≈ 5.0
+
+            # Polynomial evaluation
+            function f_poly(x::Float64)::Float64
+                return 3.0 * x * x + 2.0 * x + 1.0
+            end
+            @test parse(Float64, compile_and_run(f_poly, (Float64,), 2.0)) ≈ 17.0
+        end
+    end
 end

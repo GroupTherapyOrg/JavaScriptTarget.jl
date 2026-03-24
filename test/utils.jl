@@ -27,7 +27,9 @@ function compile_and_run(f, arg_types::Tuple, args...; func_name=nothing, kwargs
 
     # Build the call expression
     js_args = join([js_literal(a) for a in args], ", ")
-    name = something(func_name, string(nameof(f)))
+    raw_name = something(func_name, string(nameof(f)))
+    # Sanitize the name the same way compile() does
+    name = replace(replace(raw_name, "!" => "_b"), "#" => "_")
 
     # Wrap: define function + call + print result
     test_code = """

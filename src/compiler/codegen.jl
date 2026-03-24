@@ -514,6 +514,14 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             return "Object.keys($(arg_val)).length"
         elseif bname == "fieldtype" || bname == "apply_type"
             return "undefined"
+        elseif bname == "ifelse"
+            cond = compile_value(ctx, args[2])
+            t_val = compile_value(ctx, args[3])
+            f_val = compile_value(ctx, args[4])
+            return "($(cond) ? $(t_val) : $(f_val))"
+        elseif bname == "throw"
+            arg_val = compile_value(ctx, args[2])
+            return "(() => { throw $(arg_val) })()"
         end
         # Other builtins (===, isa, getfield, etc.) fall through to handlers below
     end
@@ -1291,6 +1299,8 @@ function compile_intrinsic(ctx::JSCompilationContext, name::Symbol, args::Abstra
         return "Math.floor($(compiled_args[1]))"
     elseif name === :trunc_llvm
         return "Math.trunc($(compiled_args[1]))"
+    elseif name === :rint_llvm
+        return "Math.round($(compiled_args[1]))"
     elseif name === :sitofp
         return "+($(compiled_args[2]))"
     elseif name === :fptosi
