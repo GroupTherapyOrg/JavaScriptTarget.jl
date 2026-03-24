@@ -22,6 +22,7 @@ mutable struct JSCompilationContext
     js_locals::Dict{Int, String}
     local_counter::Int
     indent::Int
+    captured_vars::Dict{Symbol, String}  # For closures: field_name → JS expression
 end
 
 function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return_type::Type, func_name::String)
@@ -49,6 +50,7 @@ function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return
         Dict{Int, String}(),
         0,
         1,
+        Dict{Symbol, String}(),
     )
 end
 

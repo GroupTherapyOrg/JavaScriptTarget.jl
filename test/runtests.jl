@@ -286,4 +286,42 @@ include("utils.jl")
         @test occursin("f_double", result.dts)
         @test occursin("f_triple", result.dts)
     end
+
+    @testset "FN-002: Closures" begin
+        # Simple closure: adder
+        function f_adder(n::Int32)
+            return x::Int32 -> x + n
+        end
+        result = compile(f_adder, (Int32,); module_format=:none)
+        js_code = """
+$(result.js)
+const add5 = f_adder(5);
+process.stdout.write(String(add5(10)));
+"""
+        @test run_js(js_code) == "15"
+
+        # Multi-capture closure
+        function f_linear(a::Int32, b::Int32)
+            return x::Int32 -> a * x + b
+        end
+        result2 = compile(f_linear, (Int32, Int32); module_format=:none)
+        js_code2 = """
+$(result2.js)
+const f = f_linear(2, 3);
+process.stdout.write(String(f(5)));
+"""
+        @test run_js(js_code2) == "13"
+
+        # Closure with no capture (constant function)
+        function f_const_maker()
+            return x::Int32 -> x * Int32(2)
+        end
+        result3 = compile(f_const_maker, (); module_format=:none)
+        js_code3 = """
+$(result3.js)
+const double = f_const_maker();
+process.stdout.write(String(double(7)));
+"""
+        @test run_js(js_code3) == "14"
+    end
 end

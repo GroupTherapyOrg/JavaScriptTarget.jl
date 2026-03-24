@@ -401,6 +401,14 @@ function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
         else
             print(buf, "$(indent)$(result);\n")
         end
+    elseif expr.head === :new
+        result = compile_new_expr(ctx, expr)
+        if haskey(ctx.js_locals, idx)
+            name = ctx.js_locals[idx]
+            print(buf, "$(indent)$(name) = $(result);\n")
+        else
+            print(buf, "$(indent)$(result);\n")
+        end
     elseif expr.head === :boundscheck
         # Bounds check marker — skip in JS
     end
@@ -473,6 +481,27 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         end
     end
 
+    # Handle Core.getfield for captured closure variables
+    if callee isa GlobalRef && callee.mod === Core && callee.name === :getfield
+        obj = args[2]
+        field_arg = args[3]
+        # Closure captured variable: getfield(self, :name)
+        if obj isa Core.Argument && obj.n == 1 && field_arg isa QuoteNode && field_arg.value isa Symbol
+            fname = field_arg.value
+            if haskey(ctx.captured_vars, fname)
+                return ctx.captured_vars[fname]
+            end
+        end
+        # General field access (for future struct support)
+        obj_val = compile_value(ctx, obj)
+        field_name = if field_arg isa QuoteNode && field_arg.value isa Symbol
+            string(field_arg.value)
+        else
+            compile_value(ctx, field_arg)
+        end
+        return "$(obj_val).$(field_name)"
+    end
+
     # Handle not_int called as a builtin (boolean negation)
     if callee isa GlobalRef && callee.name === :not_int
         resolved = try getfield(callee.mod, callee.name) catch; nothing end
@@ -523,6 +552,73 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
     end
 
     return "$(func_name)($(join(call_args, ", ")))"
+end
+
+"""
+Compile a :new expression. Handles closure creation and (later) struct construction.
+"""
+function compile_new_expr(ctx::JSCompilationContext, expr::Expr)
+    T = expr.args[1]
+    captured_args = expr.args[2:end]
+
+    if T isa DataType && T <: Function
+        return compile_closure_creation(ctx, T, captured_args)
+    else
+        # Struct construction (ST-001)
+        type_name = string(nameof(T))
+        args_js = [compile_value(ctx, a) for a in captured_args]
+        return "new $(type_name)($(join(args_js, ", ")))"
+    end
+end
+
+"""
+Compile closure creation: %new(ClosureType, captured...) → JS function expression.
+"""
+function compile_closure_creation(ctx::JSCompilationContext, T::DataType, captured_args::AbstractVector)
+    # Get field names (= captured variable names)
+    fnames = fieldnames(T)
+
+    # Map captured field names to their JS values from the outer context
+    captured_vals = Dict{Symbol, String}()
+    for (i, arg) in enumerate(captured_args)
+        captured_vals[fnames[i]] = compile_value(ctx, arg)
+    end
+
+    # Find the closure's method via _methods_by_ftype
+    ftype = Tuple{T, Vararg{Any}}
+    matches = Base._methods_by_ftype(ftype, -1, Base.get_world_counter())
+    isempty(matches) && error("No method found for closure type $T")
+    m = first(matches).method
+
+    # Get the non-self parameter types from the method signature
+    param_types = m.sig.parameters[2:end]
+
+    # Get typed IR (use code_typed_by_type since code_typed(Method, ...) may return empty)
+    ci, rt = Base.code_typed_by_type(Tuple{T, param_types...}; optimize=true)[1]
+
+    # Build argument names for the closure (skip #self# at slot 1)
+    nargs = length(param_types)
+    closure_arg_names = String[]
+    for i in 1:nargs
+        slot_idx = i + 1
+        if slot_idx <= length(ci.slotnames)
+            push!(closure_arg_names, string(ci.slotnames[slot_idx]))
+        else
+            push!(closure_arg_names, "arg$i")
+        end
+    end
+
+    # Create a context for the closure body
+    closure_arg_types = tuple(param_types...)
+    closure_ctx = JSCompilationContext(ci, closure_arg_types, rt, "")
+    closure_ctx.arg_names = closure_arg_names
+    closure_ctx.captured_vars = captured_vals
+
+    # Compile the closure body
+    js_body = compile_function(closure_ctx)
+
+    # compile_function emits "function (args) { ... }\n" (empty name)
+    return strip(js_body)
 end
 
 """
@@ -655,6 +751,8 @@ function compile_value(ctx::JSCompilationContext, val)
             return compile_call(ctx, stmt)
         elseif stmt isa Expr && stmt.head === :invoke
             return compile_invoke(ctx, stmt)
+        elseif stmt isa Expr && stmt.head === :new
+            return compile_new_expr(ctx, stmt)
         end
         # Fallback: create a local
         return get_local!(ctx, id)
@@ -691,6 +789,13 @@ function compile_value(ctx::JSCompilationContext, val)
         return repr(string(val))
     elseif val isa Type
         return string(val)
+    elseif val isa Function
+        # Singleton closure (no captures)
+        T = typeof(val)
+        if T <: Function && Base.issingletontype(T)
+            return compile_closure_creation(ctx, T, Any[])
+        end
+        return "/* unsupported function: $(typeof(val)) */ undefined"
     else
         return "/* unsupported: $(typeof(val)) */ undefined"
     end
