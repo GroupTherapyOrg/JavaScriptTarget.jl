@@ -2492,7 +2492,7 @@ process.stdout.write(String(f_isempty("hello")));
             src = "function classify(x)\n  if x > 0\n    return 1\n  elseif x < 0\n    return -1\n  else\n    return 0\n  end\nend"
             ir = get_func_ir(src, "classify")
             ret_count = count(s -> s["kind"] == 6, ir["code"])
-            @test ret_count == 3
+            @test ret_count == 4  # 3 explicit + 1 auto-return (elseif bodies now properly emitted)
         end
 
         @testset "While loop with phi" begin
@@ -2699,6 +2699,211 @@ process.stdout.write(String(f_isempty("hello")));
             # Should have a literal for 3.14159
             has_float = any(s -> s["kind"] == 5 && get(s, "value", nothing) ≈ 3.14159, ir["code"])
             @test has_float
+        end
+    end
+
+    # ==============================================================
+    # PG-005: codegen.js — Julia SSA IR → JavaScript code generator
+    # ==============================================================
+
+    @testset "PG-005: codegen.js" begin
+        # Helper: compile Julia source through the full JS pipeline and eval
+        codegen_path = joinpath(@__DIR__, "..", "src", "playground", "codegen.js")
+
+        function playground_eval(julia_source::String)
+            escaped = replace(julia_source, "\\" => "\\\\", "'" => "\\'", "\n" => "\\n")
+            js_code = """
+            const codegen = require('$(replace(codegen_path, "\\" => "\\\\"))');
+            var result = codegen.compile('$(escaped)');
+            var output = '';
+            var origLog = console.log;
+            console.log = function() {
+                var a = [];
+                for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i]));
+                output += a.join('') + '\\n';
+            };
+            try { eval(result.js); } catch(e) { output += 'ERROR: ' + e.message + '\\n'; }
+            console.log = origLog;
+            process.stdout.write(output.trim());
+            """
+            return run_js(js_code)
+        end
+
+        @testset "Module loads" begin
+            result = run_js("""
+            const cg = require('$(replace(codegen_path, "\\" => "\\\\"))');
+            process.stdout.write(typeof cg.compile + ',' + typeof cg.generateModule + ',' + typeof cg.generateStruct);
+            """)
+            @test result == "function,function,function"
+        end
+
+        @testset "Arithmetic" begin
+            @test playground_eval("println(1 + 2)") == "3"
+            @test playground_eval("println(10 - 3)") == "7"
+            @test playground_eval("println(6 * 7)") == "42"
+            @test playground_eval("println(10 / 4)") == "2.5"
+            @test playground_eval("println(2 ^ 10)") == "1024"
+        end
+
+        @testset "Float arithmetic" begin
+            @test playground_eval("println(2.5 + 3.0)") == "5.5"
+            @test playground_eval("println(10.0 / 3.0)") == "3.3333333333333335"
+            @test playground_eval("println(2.0 ^ 0.5)") == "1.4142135623730951"
+        end
+
+        @testset "String operations" begin
+            @test playground_eval("println(\"hello world\")") == "hello world"
+            @test playground_eval("println(uppercase(\"hello\"))") == "HELLO"
+            @test playground_eval("println(lowercase(\"WORLD\"))") == "world"
+            @test playground_eval("println(length(\"test\"))") == "4"
+            @test playground_eval("println(startswith(\"hello\", \"hel\"))") == "true"
+            @test playground_eval("println(endswith(\"hello\", \"llo\"))") == "true"
+            @test playground_eval("println(strip(\"  hi  \"))") == "hi"
+        end
+
+        @testset "String interpolation" begin
+            @test playground_eval("x = 42\nprintln(string(\"x = \", x))") == "x = 42"
+            @test playground_eval("println(string(\"a\", \"b\", \"c\"))") == "abc"
+        end
+
+        @testset "Math functions" begin
+            @test playground_eval("println(sin(0.0))") == "0"
+            @test playground_eval("println(cos(0.0))") == "1"
+            @test playground_eval("println(sqrt(16.0))") == "4"
+            @test playground_eval("println(abs(-5))") == "5"
+            @test playground_eval("println(floor(3.7))") == "3"
+            @test playground_eval("println(ceil(3.2))") == "4"
+            @test playground_eval("println(round(3.5))") == "4"
+            @test playground_eval("println(sign(-3))") == "-1"
+            @test playground_eval("println(min(3, 7))") == "3"
+            @test playground_eval("println(max(3, 7))") == "7"
+        end
+
+        @testset "Comparisons and logic" begin
+            @test playground_eval("println(3 > 2)") == "true"
+            @test playground_eval("println(3 < 2)") == "false"
+            @test playground_eval("println(3 == 3)") == "true"
+            @test playground_eval("println(3 != 4)") == "true"
+            @test playground_eval("println(3 >= 3)") == "true"
+            @test playground_eval("println(!true)") == "false"
+        end
+
+        @testset "Function definition and call" begin
+            @test playground_eval("function f(x)\n  return x * x\nend\nprintln(f(5))") == "25"
+            @test playground_eval("function add(a, b)\n  return a + b\nend\nprintln(add(3, 4))") == "7"
+        end
+
+        @testset "Cross-function calls" begin
+            @test playground_eval("function square(x)\n  return x * x\nend\nfunction cube(x)\n  return x * square(x)\nend\nprintln(cube(3))") == "27"
+        end
+
+        @testset "If/else" begin
+            @test playground_eval("function myabs(x)\n  if x > 0\n    return x\n  else\n    return -x\n  end\nend\nprintln(myabs(-5))") == "5"
+            @test playground_eval("function myabs(x)\n  if x > 0\n    return x\n  else\n    return -x\n  end\nend\nprintln(myabs(3))") == "3"
+        end
+
+        @testset "If/else with variable assignment" begin
+            @test playground_eval("function classify(x)\n  if x > 0\n    result = \"positive\"\n  else\n    result = \"non-positive\"\n  end\n  return result\nend\nprintln(classify(5))") == "positive"
+            @test playground_eval("function classify(x)\n  if x > 0\n    result = \"positive\"\n  else\n    result = \"non-positive\"\n  end\n  return result\nend\nprintln(classify(-3))") == "non-positive"
+        end
+
+        @testset "While loop" begin
+            @test playground_eval("function mysum(n)\n  s = 0\n  i = 1\n  while i <= n\n    s = s + i\n    i = i + 1\n  end\n  return s\nend\nprintln(mysum(10))") == "55"
+            @test playground_eval("function mysum(n)\n  s = 0\n  i = 1\n  while i <= n\n    s = s + i\n    i = i + 1\n  end\n  return s\nend\nprintln(mysum(0))") == "0"
+        end
+
+        @testset "For loop (range)" begin
+            @test playground_eval("function mysum(n)\n  s = 0\n  for i in 1:n\n    s = s + i\n  end\n  return s\nend\nprintln(mysum(10))") == "55"
+        end
+
+        @testset "Nested control flow" begin
+            @test playground_eval("function count_pos(n)\n  c = 0\n  i = 1\n  while i <= n\n    if i > 3\n      c = c + 1\n    end\n    i = i + 1\n  end\n  return c\nend\nprintln(count_pos(7))") == "4"
+        end
+
+        @testset "Fibonacci" begin
+            @test playground_eval("function fib(n)\n  if n <= 1\n    return n\n  end\n  a = 0\n  b = 1\n  i = 2\n  while i <= n\n    c = a + b\n    a = b\n    b = c\n    i = i + 1\n  end\n  return b\nend\nprintln(fib(10))") == "55"
+        end
+
+        @testset "Struct" begin
+            @test playground_eval("struct Point\n  x\n  y\nend\nfunction dist(p)\n  return sqrt(p.x * p.x + p.y * p.y)\nend\nprintln(dist(Point(3.0, 4.0)))") == "5"
+        end
+
+        @testset "Struct field access" begin
+            @test playground_eval("struct Pair\n  first\n  second\nend\np = Pair(10, 20)\nprintln(p.first)\nprintln(p.second)") == "10\n20"
+        end
+
+        @testset "Try/catch" begin
+            @test playground_eval("function safe_div(a, b)\n  try\n    return a / b\n  catch e\n    return -1\n  end\nend\nprintln(safe_div(10, 2))") == "5"
+        end
+
+        @testset "Multiple println" begin
+            @test playground_eval("println(1)\nprintln(2)\nprintln(3)") == "1\n2\n3"
+        end
+
+        @testset "Nothing and bool" begin
+            @test playground_eval("println(nothing)") == "nothing"
+            @test playground_eval("println(true)") == "true"
+            @test playground_eval("println(false)") == "false"
+        end
+
+        @testset "Pipe operator" begin
+            @test playground_eval("function double(x)\n  return x * 2\nend\nprintln(5 |> double)") == "10"
+        end
+
+        @testset "Struct class generation" begin
+            result = run_js("""
+            const cg = require('$(replace(codegen_path, "\\" => "\\\\"))');
+            var s = cg.generateStruct({name: 'Point', fields: [{name: 'x'}, {name: 'y'}], typeId: 100});
+            process.stdout.write(s);
+            """)
+            @test occursin("function Point(x, y)", result)
+            @test occursin("this.x = x", result)
+            @test occursin("this.y = y", result)
+            @test occursin("Point.prototype.\$type = 100", result)
+        end
+
+        @testset "Sanitize name" begin
+            result = run_js("""
+            const cg = require('$(replace(codegen_path, "\\" => "\\\\"))');
+            process.stdout.write(cg.sanitizeName('push!') + ',' + cg.sanitizeName('#lambda'));
+            """)
+            @test result == "push_b,_lambda"
+        end
+
+        @testset "Type helpers" begin
+            result = run_js("""
+            const cg = require('$(replace(codegen_path, "\\" => "\\\\"))');
+            var checks = [
+                cg.isIntType(8),   // INT64
+                cg.isIntType(17),  // FLOAT64
+                cg.isFloatType(17), // FLOAT64
+                cg.isFloatType(8),  // INT64
+                cg.isNumericType(8),
+                cg.isNumericType(19), // STRING
+            ].map(String).join(',');
+            process.stdout.write(checks);
+            """)
+            @test result == "true,false,true,false,true,false"
+        end
+
+        @testset "Elseif chain" begin
+            @test playground_eval("function grade(x)\n  if x >= 90\n    return \"A\"\n  elseif x >= 80\n    return \"B\"\n  elseif x >= 70\n    return \"C\"\n  else\n    return \"F\"\n  end\nend\nprintln(grade(95))\nprintln(grade(85))\nprintln(grade(75))\nprintln(grade(50))") == "A\nB\nC\nF"
+        end
+
+        @testset "Factorial (recursion)" begin
+            @test playground_eval("function factorial(n)\n  if n <= 1\n    return 1\n  else\n    return n * factorial(n - 1)\n  end\nend\nprintln(factorial(5))") == "120"
+        end
+
+        @testset "GCD (Euclidean)" begin
+            @test playground_eval("function gcd(a, b)\n  while b != 0\n    t = b\n    b = a - (a / b |> floor) * b\n    a = t\n  end\n  return a\nend\nprintln(gcd(48, 18))") == "6"
+        end
+
+        @testset "Array literal and getindex" begin
+            @test playground_eval("a = [10, 20, 30]\nprintln(a[1])\nprintln(a[3])") == "10\n30"
+        end
+
+        @testset "Collatz sequence length" begin
+            @test playground_eval("function collatz(n)\n  steps = 0\n  while n != 1\n    if n > 2 * (n / 2 |> floor)\n      n = 3 * n + 1\n    else\n      n = n / 2\n    end\n    steps = steps + 1\n  end\n  return steps\nend\nprintln(collatz(6))") == "8"
         end
     end
 end

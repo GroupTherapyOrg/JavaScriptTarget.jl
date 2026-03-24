@@ -1178,7 +1178,7 @@ function lowerIf(node, ctx, mod) {
     var nestedElse = {
       kind: 'If',
       condition: firstElseif.condition,
-      then: firstElseif.then,
+      then: firstElseif.body || firstElseif.then,
       elseifs: restElseifs,
       'else': node['else'],
     };
