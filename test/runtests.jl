@@ -185,4 +185,43 @@ include("utils.jl")
         f_itof2(x::Int32) = Float64(x)
         @test compile_and_run(f_itof2, (Int32,), Int32(100)) == "100"
     end
+
+    @testset "CT-002: String literals, interpolation, concatenation" begin
+        # String literal return
+        f_hello() = "hello"
+        @test compile_and_run(f_hello, ()) == "hello"
+
+        # String argument passthrough
+        f_echo(s::String) = s
+        @test compile_and_run(f_echo, (String,), "world") == "world"
+
+        # String interpolation (all strings)
+        f_greet(name::String) = "Hello $(name)!"
+        @test compile_and_run(f_greet, (String,), "Julia") == "Hello Julia!"
+
+        # String interpolation with Int32
+        f_intstr(x::Int32) = "Value: $(x)"
+        @test compile_and_run(f_intstr, (Int32,), Int32(42)) == "Value: 42"
+
+        # String concatenation with *
+        f_star(a::String, b::String) = a * b
+        @test compile_and_run(f_star, (String, String), "foo", "bar") == "foobar"
+
+        # string() with multiple args
+        f_concat(a::String, b::String) = string(a, b)
+        @test compile_and_run(f_concat, (String, String), "hello", " world") == "hello world"
+
+        # String comparison (== uses ===)
+        f_streq(a::String, b::String) = a == b
+        @test compile_and_run(f_streq, (String, String), "abc", "abc") == "true"
+        @test compile_and_run(f_streq, (String, String), "abc", "def") == "false"
+
+        # String repeat (^)
+        f_rep(s::String, n::Int32) = s ^ n
+        @test compile_and_run(f_rep, (String, Int32), "ab", Int32(3)) == "ababab"
+
+        # Mixed type interpolation
+        f_mix(name::String, age::Int32) = string(name, " is ", age)
+        @test compile_and_run(f_mix, (String, Int32), "Alice", Int32(30)) == "Alice is 30"
+    end
 end

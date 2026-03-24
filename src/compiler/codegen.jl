@@ -434,6 +434,11 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             f_val = compile_value(ctx, args[4])
             return "($(cond) ? $(t_val) : $(f_val))"
         end
+
+        # Base.string(...) → template literal
+        if bname === :string && callee.mod === Base
+            return compile_string_concat(ctx, args[2:end])
+        end
     end
 
     # Handle Core.=== (egal)
@@ -479,7 +484,51 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
         return "(() => { throw new Error('DomainError') })()"
     end
 
+    # String operations: _string and print_to_string → template literal
+    if func_name == "_string" || func_name == "print_to_string"
+        # args[3:end] are the values to concatenate (skip CodeInstance and GlobalRef)
+        return compile_string_concat(ctx, expr.args[3:end])
+    end
+
+    # String repeat: s.repeat(n)
+    if func_name == "repeat"
+        s_val = compile_value(ctx, expr.args[3])
+        n_val = compile_value(ctx, expr.args[4])
+        return "$(s_val).repeat($(n_val))"
+    end
+
     return "$(func_name)($(join(call_args, ", ")))"
+end
+
+"""
+Escape a string for use inside a JS template literal.
+"""
+function escape_template_literal(s::String)
+    s = replace(s, "\\" => "\\\\")
+    s = replace(s, "`" => "\\`")
+    s = replace(s, "\$" => "\\\$")
+    s = replace(s, "\n" => "\\n")
+    s = replace(s, "\r" => "\\r")
+    s = replace(s, "\t" => "\\t")
+    return s
+end
+
+"""
+Compile a string concatenation (from Base._string or Base.print_to_string) to a JS template literal.
+"""
+function compile_string_concat(ctx::JSCompilationContext, args::AbstractVector)
+    buf = IOBuffer()
+    print(buf, '`')
+    for arg in args
+        if arg isa String
+            print(buf, escape_template_literal(arg))
+        else
+            val = compile_value(ctx, arg)
+            print(buf, "\${", val, "}")
+        end
+    end
+    print(buf, '`')
+    return String(take!(buf))
 end
 
 """
