@@ -45,7 +45,7 @@ function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return
         arg_names,
         return_type,
         func_name,
-        collect(code_info.ssavaluetypes),
+        ndims(code_info.ssavaluetypes) == 0 ? Any[] : collect(Any, code_info.ssavaluetypes),
         Dict{Int, String}(),
         0,
         1,

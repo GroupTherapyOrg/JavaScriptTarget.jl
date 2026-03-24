@@ -448,6 +448,31 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         return "$(a) === $(b)"
     end
 
+    # Handle isa(x, T) type checks
+    is_isa = callee isa typeof(isa) ||
+             (callee isa GlobalRef && callee.name === :isa)
+    if is_isa && length(args) >= 3
+        x_val = compile_value(ctx, args[2])
+        type_arg = args[3]
+        # Resolve the type
+        T = if type_arg isa GlobalRef
+            try getfield(type_arg.mod, type_arg.name) catch; nothing end
+        elseif type_arg isa Type || type_arg isa DataType
+            type_arg
+        else
+            nothing
+        end
+        if T === Nothing
+            return "$(x_val) === null"
+        elseif T === Int32 || T === Int64 || T === UInt32 || T === UInt64 || T === Float64 || T === Float32
+            return "typeof $(x_val) === \"number\""
+        elseif T === String
+            return "typeof $(x_val) === \"string\""
+        elseif T === Bool
+            return "typeof $(x_val) === \"boolean\""
+        end
+    end
+
     # Handle not_int called as a builtin (boolean negation)
     if callee isa GlobalRef && callee.name === :not_int
         resolved = try getfield(callee.mod, callee.name) catch; nothing end
@@ -623,7 +648,10 @@ function compile_value(ctx::JSCompilationContext, val)
         end
         # Try to inline the value
         stmt = ctx.code_info.code[id]
-        if stmt isa Expr && stmt.head === :call
+        if stmt isa Core.PiNode
+            # PiNode is a type narrowing no-op: pass through the value
+            return compile_value(ctx, stmt.val)
+        elseif stmt isa Expr && stmt.head === :call
             return compile_call(ctx, stmt)
         elseif stmt isa Expr && stmt.head === :invoke
             return compile_invoke(ctx, stmt)
@@ -637,6 +665,10 @@ function compile_value(ctx::JSCompilationContext, val)
         end
         return "arg$(idx)"
     elseif val isa GlobalRef
+        # Resolve well-known globals
+        if val.name === :nothing
+            return "null"
+        end
         return string(val.name)
     elseif val isa QuoteNode
         return compile_value(ctx, val.value)

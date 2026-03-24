@@ -224,4 +224,31 @@ include("utils.jl")
         f_mix(name::String, age::Int32) = string(name, " is ", age)
         @test compile_and_run(f_mix, (String, Int32), "Alice", Int32(30)) == "Alice is 30"
     end
+
+    @testset "CT-003: Union{Nothing, T} and isa checks" begin
+        # x === nothing check
+        function f_maybe(x::Union{Nothing, Int32})::Int32
+            if x === nothing
+                return Int32(0)
+            else
+                return x
+            end
+        end
+        @test compile_and_run(f_maybe, (Union{Nothing, Int32},), Int32(42)) == "42"
+        @test compile_and_run(f_maybe, (Union{Nothing, Int32},), nothing) == "0"
+
+        # isa(x, Int32)
+        f_isa_int(x::Union{Nothing, Int32}) = isa(x, Int32)
+        @test compile_and_run(f_isa_int, (Union{Nothing, Int32},), Int32(5)) == "true"
+        @test compile_and_run(f_isa_int, (Union{Nothing, Int32},), nothing) == "false"
+
+        # isa(x, Nothing)
+        f_isa_nothing(x::Union{Nothing, Int32}) = isa(x, Nothing)
+        @test compile_and_run(f_isa_nothing, (Union{Nothing, Int32},), nothing) == "true"
+        @test compile_and_run(f_isa_nothing, (Union{Nothing, Int32},), Int32(7)) == "false"
+
+        # Nothing return
+        f_ret_nothing()::Nothing = nothing
+        @test compile_and_run(f_ret_nothing, ()) == "null"
+    end
 end
