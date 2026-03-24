@@ -2906,4 +2906,285 @@ process.stdout.write(String(f_isempty("hello")));
             @test playground_eval("function collatz(n)\n  steps = 0\n  while n != 1\n    if n > 2 * (n / 2 |> floor)\n      n = 3 * n + 1\n    else\n      n = n / 2\n    end\n    steps = steps + 1\n  end\n  return steps\nend\nprintln(collatz(6))") == "8"
         end
     end
+
+    # ==============================================================
+    # PG-006: Bundle + CodeMirror playground
+    # ==============================================================
+
+    @testset "PG-006: Playground bundle" begin
+        playground_dir = joinpath(@__DIR__, "..", "src", "playground")
+        runtime_path = joinpath(playground_dir, "runtime.js")
+        worker_path = joinpath(playground_dir, "worker.js")
+
+        # --- Test 1: All playground JS files exist ---
+        @testset "All playground JS files exist" begin
+            for f in ["parser.js", "lowerer.js", "infer.js", "codegen.js", "runtime.js", "worker.js"]
+                @test isfile(joinpath(playground_dir, f))
+            end
+        end
+
+        # --- Test 2: HTML playground page exists ---
+        @testset "Playground HTML exists" begin
+            html_path = joinpath(@__DIR__, "..", "docs", "playground", "index.html")
+            @test isfile(html_path)
+            html = read(html_path, String)
+            @test occursin("CodeMirror", html)
+            @test occursin("worker.js", html)
+            @test occursin("Julia Playground", html)
+        end
+
+        # --- Test 3: runtime.js loads in Node.js ---
+        @testset "runtime.js loads in Node.js" begin
+            result = run_js("""
+            const rt = require('$(replace(runtime_path, "\\" => "\\\\"))');
+            var checks = [
+                typeof rt.jl_println === 'function',
+                typeof rt.jl_print === 'function',
+                typeof rt.jl_execute === 'function',
+                typeof rt.jl_egal === 'function',
+                typeof rt.jl_capture_reset === 'function',
+                typeof rt.jl_capture_get === 'function',
+            ].map(String).join(',');
+            process.stdout.write(checks);
+            """)
+            @test result == "true,true,true,true,true,true"
+        end
+
+        # --- Test 4: runtime.js output capture works ---
+        @testset "runtime.js output capture" begin
+            result = run_js("""
+            const rt = require('$(replace(runtime_path, "\\" => "\\\\"))');
+            rt.jl_capture_reset();
+            rt.jl_println('hello');
+            rt.jl_println('world');
+            process.stdout.write(rt.jl_capture_get().trim());
+            """)
+            @test result == "hello\nworld"
+        end
+
+        # --- Test 5: runtime.js jl_execute sandbox ---
+        @testset "runtime.js jl_execute" begin
+            result = run_js("""
+            const rt = require('$(replace(runtime_path, "\\" => "\\\\"))');
+            var r = rt.jl_execute('var x = 2 + 3;');
+            process.stdout.write(JSON.stringify({error: r.error, output: r.output}));
+            """)
+            parsed = JSON.parse(result)
+            @test parsed["error"] === nothing
+        end
+
+        # --- Test 6: runtime.js jl_execute captures errors ---
+        @testset "runtime.js error capture" begin
+            result = run_js("""
+            const rt = require('$(replace(runtime_path, "\\" => "\\\\"))');
+            var r = rt.jl_execute('throw new Error("test error");');
+            process.stdout.write(r.error || 'null');
+            """)
+            @test occursin("test error", result)
+        end
+
+        # --- Test 7: runtime.js math helpers ---
+        @testset "runtime.js math helpers" begin
+            result = run_js("""
+            const rt = require('$(replace(runtime_path, "\\" => "\\\\"))');
+            var checks = [
+                rt.jl_div(7, 2),
+                rt.jl_fld(7, 2),
+                rt.jl_mod(7, 3),
+                rt.jl_cld(7, 2),
+            ].map(String).join(',');
+            process.stdout.write(checks);
+            """)
+            @test result == "3,3,1,4"
+        end
+
+        # --- Test 8: runtime.js jl_egal ---
+        @testset "runtime.js jl_egal" begin
+            result = run_js("""
+            const rt = require('$(replace(runtime_path, "\\" => "\\\\"))');
+            var checks = [
+                rt.jl_egal(1, 1),
+                rt.jl_egal(1, 2),
+                rt.jl_egal({a:1, b:2}, {a:1, b:2}),
+                rt.jl_egal({a:1}, {a:2}),
+                rt.jl_egal(null, null),
+                rt.jl_egal(null, 1),
+            ].map(String).join(',');
+            process.stdout.write(checks);
+            """)
+            @test result == "true,false,true,false,true,false"
+        end
+
+        # --- Test 9: worker.js compileAndRun via Node.js ---
+        @testset "worker.js compileAndRun" begin
+            # Load all pipeline files and test compileAndRun
+            codegen_path = joinpath(playground_dir, "codegen.js")
+            result = run_js("""
+            const codegen = require('$(replace(codegen_path, "\\" => "\\\\"))');
+            var r = codegen.compile('println("hello from worker")');
+            var output = '';
+            var origLog = console.log;
+            console.log = function() {
+                var a = [];
+                for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i]));
+                output += a.join('') + '\\n';
+            };
+            try { eval(r.js); } catch(e) { output += 'ERROR: ' + e.message + '\\n'; }
+            console.log = origLog;
+            process.stdout.write(output.trim());
+            """)
+            @test result == "hello from worker"
+        end
+
+        # --- Test 10: worker.js arithmetic pipeline ---
+        @testset "worker.js arithmetic" begin
+            codegen_path = joinpath(playground_dir, "codegen.js")
+            result = run_js("""
+            const codegen = require('$(replace(codegen_path, "\\" => "\\\\"))');
+            var r = codegen.compile('function f(x)\\n  return x * x + 1\\nend\\nprintln(f(5))');
+            var output = '';
+            var origLog = console.log;
+            console.log = function() {
+                var a = [];
+                for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i]));
+                output += a.join('') + '\\n';
+            };
+            try { eval(r.js); } catch(e) { output += 'ERROR: ' + e.message + '\\n'; }
+            console.log = origLog;
+            process.stdout.write(output.trim());
+            """)
+            @test result == "26"
+        end
+
+        # --- Test 11: build_playground() function ---
+        @testset "build_playground()" begin
+            build_dir = mktempdir()
+            try
+                info = build_playground(build_dir; verbose=false)
+                @test isdir(build_dir)
+                # Check all files were created
+                for f in ["parser.js", "lowerer.js", "infer.js", "codegen.js", "runtime.js", "worker.js"]
+                    @test isfile(joinpath(build_dir, f))
+                end
+                @test isfile(joinpath(build_dir, "types.bin"))
+                @test isfile(joinpath(build_dir, "index.html"))
+                # Check return value
+                @test info.js_bytes > 0
+                @test info.types_bytes > 0
+                @test info.total_bytes > 0
+                @test length(info.js_files) == 6
+            finally
+                rm(build_dir; recursive=true, force=true)
+            end
+        end
+
+        # --- Test 12: build_playground() with bundle option ---
+        @testset "build_playground() with bundle" begin
+            build_dir = mktempdir()
+            try
+                info = build_playground(build_dir; verbose=false, bundle=true)
+                @test isfile(joinpath(build_dir, "playground-bundle.js"))
+                @test info.bundle_bytes > 0
+                # Bundle should contain all pipeline files
+                bundle_content = read(joinpath(build_dir, "playground-bundle.js"), String)
+                @test occursin("parser.js", bundle_content)
+                @test occursin("lowerer.js", bundle_content)
+                @test occursin("codegen.js", bundle_content)
+            finally
+                rm(build_dir; recursive=true, force=true)
+            end
+        end
+
+        # --- Test 13: Generated types.bin loads in infer.js ---
+        @testset "types.bin loads in infer.js" begin
+            build_dir = mktempdir()
+            try
+                build_playground(build_dir; verbose=false)
+                types_bin = joinpath(build_dir, "types.bin")
+                infer_path = joinpath(playground_dir, "infer.js")
+                result = run_js("""
+                const fs = require('fs');
+                const infer = require('$(replace(infer_path, "\\" => "\\\\"))');
+                const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+                const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+                process.stdout.write(tables ? 'loaded' : 'null');
+                """)
+                @test result == "loaded"
+            finally
+                rm(build_dir; recursive=true, force=true)
+            end
+        end
+
+        # --- Test 14: Full pipeline in build dir (compile + execute) ---
+        @testset "Full pipeline in build dir" begin
+            build_dir = mktempdir()
+            try
+                build_playground(build_dir; verbose=false)
+                codegen_path = joinpath(build_dir, "codegen.js")
+                result = run_js("""
+                const codegen = require('$(replace(codegen_path, "\\" => "\\\\"))');
+                var r = codegen.compile('function fib(n)\\n  if n <= 1\\n    return n\\n  end\\n  return fib(n - 1) + fib(n - 2)\\nend\\nprintln(fib(10))');
+                var output = '';
+                var origLog = console.log;
+                console.log = function() {
+                    var a = [];
+                    for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i]));
+                    output += a.join('') + '\\n';
+                };
+                try { eval(r.js); } catch(e) { output += 'ERROR: ' + e.message + '\\n'; }
+                console.log = origLog;
+                process.stdout.write(output.trim());
+                """)
+                @test result == "55"
+            finally
+                rm(build_dir; recursive=true, force=true)
+            end
+        end
+
+        # --- Test 15: runtime.js string helpers ---
+        @testset "runtime.js string helpers" begin
+            result = run_js("""
+            const rt = require('$(replace(runtime_path, "\\" => "\\\\"))');
+            var checks = [
+                rt.jl_string('hello', ' ', 'world'),
+                rt.jl_strlen('hello'),
+                rt.jl_strindex('hello', 1),
+                rt.jl_substring('hello', 2, 4),
+            ].join(',');
+            process.stdout.write(checks);
+            """)
+            @test result == "hello world,5,h,ell"
+        end
+
+        # --- Test 16: runtime.js checked arithmetic ---
+        @testset "runtime.js checked arithmetic" begin
+            result = run_js("""
+            const rt = require('$(replace(runtime_path, "\\" => "\\\\"))');
+            var checks = [
+                rt.jl_checked_add(2, 3),
+                rt.jl_checked_sub(10, 4),
+                rt.jl_checked_mul(6, 7),
+            ].map(String).join(',');
+            process.stdout.write(checks);
+            """)
+            @test result == "5,6,42"
+        end
+
+        # --- Test 17: Playground page has required elements ---
+        @testset "Playground HTML elements" begin
+            html_path = joinpath(@__DIR__, "..", "docs", "playground", "index.html")
+            html = read(html_path, String)
+            @test occursin("id=\"editor-wrap\"", html)
+            @test occursin("id=\"output\"", html)
+            @test occursin("id=\"run-btn\"", html)
+            @test occursin("Ctrl-Enter", html) || occursin("Ctrl+Enter", html)
+            @test occursin("codemirror", lowercase(html))
+            @test occursin("examples", lowercase(html))
+        end
+
+        # --- Test 18: build_playground export ---
+        @testset "build_playground is exported" begin
+            @test isdefined(JavaScriptTarget, :build_playground)
+        end
+    end
 end

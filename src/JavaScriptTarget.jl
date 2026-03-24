@@ -6,6 +6,7 @@ using InteractiveUtils: subtypes
 export compile, compile_module
 export JSOutput
 export build_inference_tables
+export build_playground
 
 # === Types ===
 include("compiler/types.jl")
@@ -25,5 +26,8 @@ include("compiler/sourcemap.jl")
 # === Playground: Inference Tables ===
 include("playground/type_registry.jl")
 include("playground/inference_tables.jl")
+
+# === Playground: Build ===
+include("playground/build.jl")
 
 end # module JavaScriptTarget
