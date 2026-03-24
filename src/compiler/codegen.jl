@@ -1,0 +1,695 @@
+"""
+    compile_function(ctx::JSCompilationContext) -> String
+
+Compile a single function's IR to JavaScript source code.
+Handles control flow: if/else, while loops, phi nodes.
+"""
+function compile_function(ctx::JSCompilationContext)
+    code = ctx.code_info.code
+    n = length(code)
+
+    # === Pass 1: Analyze control flow ===
+    # Find all jump targets (block start points)
+    block_starts = Set{Int}([1])
+    backward_edges = Dict{Int, Int}()   # source_idx → target_idx (loops)
+    forward_gotos = Dict{Int, Int}()    # source_idx → target_idx
+
+    for (i, stmt) in enumerate(code)
+        if stmt isa Core.GotoNode
+            push!(block_starts, stmt.label)
+            if stmt.label <= i
+                backward_edges[i] = stmt.label
+            else
+                forward_gotos[i] = stmt.label
+            end
+            # Statement after goto is a new block
+            if i + 1 <= n
+                push!(block_starts, i + 1)
+            end
+        elseif stmt isa Core.GotoIfNot
+            push!(block_starts, stmt.dest)
+            if i + 1 <= n
+                push!(block_starts, i + 1)
+            end
+        end
+    end
+
+    loop_headers = Set(values(backward_edges))
+
+    # === Pass 2: Collect phi nodes ===
+    phi_info = Dict{Int, Core.PhiNode}()  # SSA idx → PhiNode
+    for (i, stmt) in enumerate(code)
+        if stmt isa Core.PhiNode
+            get_local!(ctx, i)  # Allocate variable name
+            phi_info[i] = stmt
+        end
+    end
+
+    # === Pass 3: Pre-allocate locals for SSA values used across blocks ===
+    # Any SSA value referenced from a different block needs a local
+    for (i, stmt) in enumerate(code)
+        if stmt isa Expr && stmt.head in (:call, :invoke, :new)
+            # Check if this value is used anywhere
+            for (j, other) in enumerate(code)
+                if j != i && references_ssa(other, i)
+                    get_local!(ctx, i)
+                    break
+                end
+            end
+        end
+    end
+
+    # === Pass 4: Emit structured code ===
+    buf = IOBuffer()
+    args_str = join(ctx.arg_names, ", ")
+    print(buf, "function $(ctx.func_name)($(args_str)) {\n")
+
+    # Declare all locals
+    declared = sort(collect(keys(ctx.js_locals)))
+    for idx in declared
+        print(buf, "  let $(ctx.js_locals[idx]);\n")
+    end
+
+    # Emit the code body
+    emit_structured!(ctx, buf, code, 1, n, loop_headers, backward_edges, forward_gotos, phi_info, 1)
+
+    print(buf, "}\n")
+    return String(take!(buf))
+end
+
+"""
+Check if a statement references a given SSA value.
+"""
+function references_ssa(stmt, ssa_id::Int)
+    target = Core.SSAValue(ssa_id)
+    if stmt isa Core.ReturnNode
+        return isdefined(stmt, :val) && stmt.val == target
+    elseif stmt isa Core.GotoIfNot
+        return stmt.cond == target
+    elseif stmt isa Expr
+        return any(a -> a == target, stmt.args)
+    elseif stmt isa Core.PhiNode
+        for k in 1:length(stmt.edges)
+            if isassigned(stmt.values, k) && stmt.values[k] == target
+                return true
+            end
+        end
+        return false
+    end
+    return false
+end
+
+"""
+Emit structured JS code for a range of IR statements.
+Uses pattern matching to detect if/else and while loop structures.
+"""
+function emit_structured!(ctx, buf, code, start_idx, end_idx, loop_headers, backward_edges, forward_gotos, phi_info, depth)
+    indent = "  " ^ depth
+    i = start_idx
+
+    while i <= end_idx
+        stmt = code[i]
+
+        # Skip nothing statements (loop entry edges, etc.)
+        if stmt === nothing
+            i += 1
+            continue
+        end
+
+        # Check for loop header FIRST (before PhiNode, since loop headers start with phis)
+        if i in loop_headers
+            # Start of a while loop — find the backward edge that targets this
+            loop_end = 0
+            for (src, tgt) in backward_edges
+                if tgt == i
+                    loop_end = src
+                    break
+                end
+            end
+
+            # Initialize phi variables for loop entry
+            for phi_idx in sort(collect(keys(phi_info)))
+                if phi_idx >= i && phi_idx <= loop_end
+                    phi = phi_info[phi_idx]
+                    var_name = ctx.js_locals[phi_idx]
+                    for (k, edge) in enumerate(phi.edges)
+                        if edge < i  # Initial value from before loop
+                            if isassigned(phi.values, k)
+                                val = compile_value(ctx, phi.values[k])
+                                print(buf, "$(indent)$(var_name) = $(val);\n")
+                            end
+                        end
+                    end
+                end
+            end
+
+            print(buf, "$(indent)while (true) {\n")
+
+            # Emit loop body (skip phi nodes at header, they're handled above)
+            loop_body_start = i
+            while loop_body_start <= loop_end && code[loop_body_start] isa Core.PhiNode
+                loop_body_start += 1
+            end
+
+            emit_loop_body!(ctx, buf, code, loop_body_start, loop_end, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, i)
+
+            print(buf, "$(indent)}\n")
+            i = loop_end + 1
+            continue
+        end
+
+        # Non-loop PhiNode (merge point from if/else)
+        if stmt isa Core.PhiNode
+            if haskey(phi_info, i)
+                phi = phi_info[i]
+                var_name = ctx.js_locals[i]
+                # Assign from the most recent edge
+                for (k, edge) in enumerate(phi.edges)
+                    if isassigned(phi.values, k)
+                        val = compile_value(ctx, phi.values[k])
+                        print(buf, "$(indent)$(var_name) = $(val);\n")
+                        break  # Take first available
+                    end
+                end
+            end
+            i += 1
+            continue
+        end
+
+        if stmt isa Core.GotoIfNot
+            cond = compile_value(ctx, stmt.cond)
+            target = stmt.dest
+
+            # Forward branch: if (!cond) goto target
+            # Find if there's a GotoNode at target-1 that jumps past target (if-else pattern)
+            has_else = false
+            merge_point = target
+            if target - 1 >= i + 1 && target - 1 <= end_idx
+                prev_stmt = code[target - 1]
+                if prev_stmt isa Core.GotoNode && prev_stmt.label > target
+                    has_else = true
+                    merge_point = prev_stmt.label
+                end
+            end
+
+            if has_else
+                # if/else: true branch = i+1..target-2, false branch = target..merge-1
+                print(buf, "$(indent)if ($(cond)) {\n")
+                emit_structured!(ctx, buf, code, i + 1, target - 2, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+                print(buf, "$(indent)} else {\n")
+                emit_structured!(ctx, buf, code, target, merge_point - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+                print(buf, "$(indent)}\n")
+                i = merge_point
+            else
+                # if-then: GotoIfNot(cond, target) means if cond is true, fall through (i+1..target-1)
+                # then continue at target
+                print(buf, "$(indent)if ($(cond)) {\n")
+                emit_structured!(ctx, buf, code, i + 1, target - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+                print(buf, "$(indent)}\n")
+                i = target
+            end
+            continue
+        end
+
+        if stmt isa Core.GotoNode
+            # Forward goto: skip (handled by if/else structure)
+            # Backward goto: handled by loop structure
+            i += 1
+            continue
+        end
+
+        # Regular statement
+        emit_single_stmt!(ctx, buf, code, i, phi_info, indent, depth)
+        i += 1
+    end
+end
+
+"""
+Emit the body of a while loop.
+"""
+function emit_loop_body!(ctx, buf, code, start_idx, end_idx, loop_headers, backward_edges, forward_gotos, phi_info, depth, loop_header)
+    indent = "  " ^ depth
+    i = start_idx
+
+    while i <= end_idx
+        stmt = code[i]
+
+        if stmt isa Core.GotoIfNot
+            cond = compile_value(ctx, stmt.cond)
+            target = stmt.dest
+
+            if target > end_idx
+                # Loop exit condition
+                print(buf, "$(indent)if (!($(cond))) break;\n")
+                i += 1
+                continue
+            else
+                # Inner if/else within loop
+                has_else = false
+                merge_point = target
+                if target - 1 >= i + 1 && target - 1 <= end_idx
+                    prev_stmt = code[target - 1]
+                    if prev_stmt isa Core.GotoNode && prev_stmt.label > target && prev_stmt.label <= end_idx + 1
+                        has_else = true
+                        merge_point = prev_stmt.label
+                    end
+                end
+
+                if has_else
+                    print(buf, "$(indent)if ($(cond)) {\n")
+                    emit_loop_body!(ctx, buf, code, i + 1, target - 2, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, loop_header)
+                    print(buf, "$(indent)} else {\n")
+                    emit_loop_body!(ctx, buf, code, target, merge_point - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, loop_header)
+                    print(buf, "$(indent)}\n")
+                    i = merge_point
+                else
+                    # if-then: true branch = i+1..target-1, continue at target
+                    # Check if target is a PhiNode (merge point) — emit as if/else with phi assignment
+                    if target <= length(code) && code[target] isa Core.PhiNode && haskey(phi_info, target)
+                        phi = phi_info[target]
+                        var_name = ctx.js_locals[target]
+                        # Find the phi values for each branch
+                        then_val = nothing
+                        else_val = nothing
+                        for (k, edge) in enumerate(phi.edges)
+                            if isassigned(phi.values, k)
+                                if edge >= i + 1 && edge < target  # from then branch
+                                    then_val = compile_value(ctx, phi.values[k])
+                                elseif edge == i || edge < i + 1  # from the GotoIfNot (skip branch)
+                                    else_val = compile_value(ctx, phi.values[k])
+                                end
+                            end
+                        end
+
+                        # Emit as if/else to properly assign phi
+                        print(buf, "$(indent)if ($(cond)) {\n")
+                        inner_indent = "  " ^ (depth + 1)
+                        emit_loop_body!(ctx, buf, code, i + 1, target - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, loop_header)
+                        if then_val !== nothing
+                            print(buf, "$(inner_indent)$(var_name) = $(then_val);\n")
+                        end
+                        print(buf, "$(indent)} else {\n")
+                        if else_val !== nothing
+                            print(buf, "$(inner_indent)$(var_name) = $(else_val);\n")
+                        end
+                        print(buf, "$(indent)}\n")
+                        i = target + 1  # Skip the phi node
+                    else
+                        print(buf, "$(indent)if ($(cond)) {\n")
+                        emit_loop_body!(ctx, buf, code, i + 1, target - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, loop_header)
+                        print(buf, "$(indent)}\n")
+                        i = target
+                    end
+                end
+                continue
+            end
+        end
+
+        if stmt isa Core.GotoNode
+            if stmt.label <= i  # Backward edge = end of loop iteration
+                # Update ONLY loop header phi variables (consecutive phis starting at loop_header)
+                phi_idx = loop_header
+                while phi_idx <= end_idx && haskey(phi_info, phi_idx) && code[phi_idx] isa Core.PhiNode
+                    phi = phi_info[phi_idx]
+                    var_name = ctx.js_locals[phi_idx]
+                    for (k, edge) in enumerate(phi.edges)
+                        if edge >= loop_header && edge <= end_idx  # Update from within loop
+                            if isassigned(phi.values, k)
+                                val = compile_value(ctx, phi.values[k])
+                                print(buf, "$(indent)$(var_name) = $(val);\n")
+                            end
+                        end
+                    end
+                    phi_idx += 1
+                end
+            end
+            i += 1
+            continue
+        end
+
+        if stmt isa Core.PhiNode
+            # Inner phi nodes (merge after if-then within loop)
+            # These need to be resolved: the if-then already assigned the "then" value,
+            # but we need to set the default "else" value when the if wasn't taken
+            if haskey(phi_info, i)
+                # The phi is already handled by the if-then block structure:
+                # the "then" path sets the variable inside the if, and we set the default here
+                # We need to emit this as a conditional assignment
+                # Skip for now — the if-then block should handle assignment
+            end
+            i += 1
+            continue
+        end
+
+        emit_single_stmt!(ctx, buf, code, i, phi_info, indent, depth)
+        i += 1
+    end
+end
+
+"""
+Emit a single non-control-flow statement.
+"""
+function emit_single_stmt!(ctx, buf, code, idx, phi_info, indent, depth)
+    stmt = code[idx]
+
+    if stmt isa Core.ReturnNode
+        if isdefined(stmt, :val)
+            val = compile_value(ctx, stmt.val)
+            print(buf, "$(indent)return $(val);\n")
+        else
+            # Unreachable return
+            print(buf, "$(indent)return;\n")
+        end
+    elseif stmt isa Expr
+        compile_expr_stmt!(ctx, buf, idx, stmt, indent)
+    elseif stmt isa Core.PiNode
+        # No-op
+    elseif stmt === nothing
+        # No-op
+    elseif stmt isa Core.PhiNode
+        # Handled elsewhere
+    elseif stmt isa Core.GotoNode || stmt isa Core.GotoIfNot
+        # Handled by control flow
+    else
+        # Literal
+        if haskey(ctx.js_locals, idx)
+            name = ctx.js_locals[idx]
+            val = compile_value(ctx, stmt)
+            print(buf, "$(indent)$(name) = $(val);\n")
+        end
+    end
+end
+
+"""
+Emit an expression statement, assigning to local if needed.
+"""
+function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
+    if expr.head === :call
+        result = compile_call(ctx, expr)
+        if haskey(ctx.js_locals, idx)
+            name = ctx.js_locals[idx]
+            print(buf, "$(indent)$(name) = $(result);\n")
+        else
+            # Side-effect only call
+            print(buf, "$(indent)$(result);\n")
+        end
+    elseif expr.head === :invoke
+        result = compile_invoke(ctx, expr)
+        if haskey(ctx.js_locals, idx)
+            name = ctx.js_locals[idx]
+            print(buf, "$(indent)$(name) = $(result);\n")
+        else
+            print(buf, "$(indent)$(result);\n")
+        end
+    elseif expr.head === :boundscheck
+        # Bounds check marker — skip in JS
+    end
+end
+
+"""
+Compile a :call expression (intrinsics, builtins, generic calls).
+"""
+function compile_call(ctx::JSCompilationContext, expr::Expr)
+    args = expr.args
+    callee = args[1]
+
+    # Check for Core.Intrinsics — may be referenced via Base.add_int etc.
+    if callee isa GlobalRef
+        resolved = try
+            getfield(callee.mod, callee.name)
+        catch
+            nothing
+        end
+        if resolved isa Core.IntrinsicFunction
+            return compile_intrinsic(ctx, callee.name, args[2:end])
+        end
+    end
+
+    # Check for known builtins
+    if callee isa GlobalRef
+        bname = callee.name
+        if bname === :ifelse
+            cond = compile_value(ctx, args[2])
+            t_val = compile_value(ctx, args[3])
+            f_val = compile_value(ctx, args[4])
+            return "($(cond) ? $(t_val) : $(f_val))"
+        end
+    end
+
+    # Handle Core.=== (egal)
+    if callee isa typeof(Core.:(===)) || (callee isa GlobalRef && callee.name === :(===))
+        a = compile_value(ctx, args[2])
+        b = compile_value(ctx, args[3])
+        return "$(a) === $(b)"
+    end
+
+    # Handle not_int called as a builtin (boolean negation)
+    if callee isa GlobalRef && callee.name === :not_int
+        resolved = try getfield(callee.mod, callee.name) catch; nothing end
+        if resolved isa Core.IntrinsicFunction
+            return compile_intrinsic(ctx, :not_int, args[2:end])
+        end
+    end
+
+    # Generic call — will be expanded later
+    callee_name = compile_value(ctx, callee)
+    call_args = [compile_value(ctx, a) for a in args[2:end]]
+    return "$(callee_name)($(join(call_args, ", ")))"
+end
+
+"""
+Compile an :invoke expression (direct method call).
+"""
+function compile_invoke(ctx::JSCompilationContext, expr::Expr)
+    # In Julia 1.12, args[1] is CodeInstance; in earlier versions, MethodInstance
+    ci_or_mi = expr.args[1]
+    mi = if ci_or_mi isa Core.CodeInstance
+        ci_or_mi.def
+    else
+        ci_or_mi
+    end
+    meth = mi.def
+    func_name = string(meth.name)
+    call_args = [compile_value(ctx, a) for a in expr.args[3:end]]
+
+    # Check if the invoked function is a known intrinsic
+    if func_name == "sqrt_llvm" || func_name == "sqrt"
+        return "Math.sqrt($(call_args[1]))"
+    elseif func_name == "throw_complex_domainerror"
+        return "(() => { throw new Error('DomainError') })()"
+    end
+
+    return "$(func_name)($(join(call_args, ", ")))"
+end
+
+"""
+Compile a Core.Intrinsics call to JavaScript.
+"""
+function compile_intrinsic(ctx::JSCompilationContext, name::Symbol, args::AbstractVector)
+    compiled_args = [compile_value(ctx, a) for a in args]
+
+    if name === :add_int
+        return "($(compiled_args[1]) + $(compiled_args[2])) | 0"
+    elseif name === :sub_int
+        return "($(compiled_args[1]) - $(compiled_args[2])) | 0"
+    elseif name === :mul_int
+        return "Math.imul($(compiled_args[1]), $(compiled_args[2]))"
+    elseif name === :neg_int
+        return "(-($(compiled_args[1]))) | 0"
+    elseif name === :add_float
+        return "$(compiled_args[1]) + $(compiled_args[2])"
+    elseif name === :sub_float
+        return "$(compiled_args[1]) - $(compiled_args[2])"
+    elseif name === :mul_float
+        return "$(compiled_args[1]) * $(compiled_args[2])"
+    elseif name === :div_float
+        return "$(compiled_args[1]) / $(compiled_args[2])"
+    elseif name === :eq_int
+        return "$(compiled_args[1]) === $(compiled_args[2])"
+    elseif name === :ne_int
+        return "$(compiled_args[1]) !== $(compiled_args[2])"
+    elseif name === :slt_int
+        return "$(compiled_args[1]) < $(compiled_args[2])"
+    elseif name === :sle_int
+        return "$(compiled_args[1]) <= $(compiled_args[2])"
+    elseif name === :eq_float
+        return "$(compiled_args[1]) === $(compiled_args[2])"
+    elseif name === :ne_float
+        return "$(compiled_args[1]) !== $(compiled_args[2])"
+    elseif name === :lt_float
+        return "$(compiled_args[1]) < $(compiled_args[2])"
+    elseif name === :le_float
+        return "$(compiled_args[1]) <= $(compiled_args[2])"
+    elseif name === :and_int
+        return "($(compiled_args[1]) & $(compiled_args[2]))"
+    elseif name === :or_int
+        return "($(compiled_args[1]) | $(compiled_args[2]))"
+    elseif name === :xor_int
+        return "($(compiled_args[1]) ^ $(compiled_args[2]))"
+    elseif name === :shl_int
+        return "($(compiled_args[1]) << $(compiled_args[2]))"
+    elseif name === :lshr_int
+        return "($(compiled_args[1]) >>> $(compiled_args[2]))"
+    elseif name === :ashr_int
+        return "($(compiled_args[1]) >> $(compiled_args[2]))"
+    elseif name === :not_int
+        return "(~$(compiled_args[1]))"
+    elseif name === :abs_float
+        return "Math.abs($(compiled_args[1]))"
+    elseif name === :neg_float
+        return "-($(compiled_args[1]))"
+    elseif name === :sqrt_llvm
+        return "Math.sqrt($(compiled_args[1]))"
+    elseif name === :ceil_llvm
+        return "Math.ceil($(compiled_args[1]))"
+    elseif name === :floor_llvm
+        return "Math.floor($(compiled_args[1]))"
+    elseif name === :trunc_llvm
+        return "Math.trunc($(compiled_args[1]))"
+    elseif name === :sitofp
+        return "+($(compiled_args[2]))"
+    elseif name === :fptosi
+        return "Math.trunc($(compiled_args[2])) | 0"
+    elseif name === :bitcast
+        return compiled_args[2]
+    elseif name === :sext_int
+        return "($(compiled_args[2])) | 0"
+    elseif name === :trunc_int
+        return "($(compiled_args[2])) | 0"
+    elseif name === :zext_int
+        return "($(compiled_args[2])) >>> 0"
+    else
+        error("Unsupported intrinsic: $name")
+    end
+end
+
+"""
+Compile a value reference (SSAValue, Argument, literal, etc.) to a JS expression string.
+"""
+function compile_value(ctx::JSCompilationContext, val)
+    if val isa Core.SSAValue
+        id = val.id
+        if haskey(ctx.js_locals, id)
+            return ctx.js_locals[id]
+        end
+        # Try to inline the value
+        stmt = ctx.code_info.code[id]
+        if stmt isa Expr && stmt.head === :call
+            return compile_call(ctx, stmt)
+        elseif stmt isa Expr && stmt.head === :invoke
+            return compile_invoke(ctx, stmt)
+        end
+        # Fallback: create a local
+        return get_local!(ctx, id)
+    elseif val isa Core.Argument
+        idx = val.n - 1
+        if idx >= 1 && idx <= length(ctx.arg_names)
+            return ctx.arg_names[idx]
+        end
+        return "arg$(idx)"
+    elseif val isa GlobalRef
+        return string(val.name)
+    elseif val isa QuoteNode
+        return compile_value(ctx, val.value)
+    elseif val isa Bool
+        return val ? "true" : "false"
+    elseif val isa Int32 || val isa Int64 || val isa Int
+        return string(val)
+    elseif val isa Float64 || val isa Float32
+        if isinf(val)
+            return val > 0 ? "Infinity" : "-Infinity"
+        elseif isnan(val)
+            return "NaN"
+        end
+        return string(val)
+    elseif val isa String
+        return repr(val)
+    elseif val === nothing || val isa Nothing
+        return "null"
+    elseif val isa Symbol
+        return repr(string(val))
+    elseif val isa Type
+        return string(val)
+    else
+        return "/* unsupported: $(typeof(val)) */ undefined"
+    end
+end
+
+"""
+    compile(f, arg_types::Tuple; options...) -> JSOutput
+
+Compile a Julia function to JavaScript.
+"""
+function compile(f, arg_types::Tuple;
+    optimize::Bool=true,
+    module_format::Symbol=:esm,
+    sourcemap::Bool=false,
+    dts::Bool=true,
+    func_name::Union{String, Nothing}=nothing,
+)
+    code_info, return_type = get_typed_ir(f, arg_types; optimize=optimize)
+    name = something(func_name, string(nameof(f)))
+    ctx = JSCompilationContext(code_info, arg_types, return_type, name)
+    js_body = compile_function(ctx)
+
+    js = if module_format === :esm
+        "export " * js_body
+    elseif module_format === :cjs
+        js_body * "module.exports = { $(name) };\n"
+    elseif module_format === :none
+        js_body
+    else
+        "(function() {\n" * js_body * "  return { $(name) };\n})();\n"
+    end
+
+    dts_str = ""
+    if dts
+        arg_dts = [js_type_string(t) for t in arg_types]
+        params = join(["$(ctx.arg_names[i]): $(arg_dts[i])" for i in 1:length(arg_types)], ", ")
+        ret_dts = js_type_string(return_type)
+        dts_str = "export declare function $(name)($(params)): $(ret_dts);\n"
+    end
+
+    return JSOutput(js, dts_str, "", [name], sizeof(js))
+end
+
+"""
+    compile_module(functions; options...) -> JSOutput
+
+Compile multiple Julia functions into a single JS module.
+"""
+function compile_module(functions::Vector;
+    optimize::Bool=true,
+    module_format::Symbol=:esm,
+    sourcemap::Bool=false,
+    dts::Bool=true,
+)
+    buf = IOBuffer()
+    dts_buf = IOBuffer()
+    export_names = String[]
+
+    for entry in functions
+        f, arg_types, name = entry
+        code_info, return_type = get_typed_ir(f, Tuple{arg_types...}; optimize=optimize)
+        ctx = JSCompilationContext(code_info, Tuple{arg_types...}, return_type, name)
+        js_body = compile_function(ctx)
+        print(buf, js_body)
+        print(buf, "\n")
+        push!(export_names, name)
+
+        if dts
+            arg_dts = [js_type_string(t) for t in arg_types]
+            params = join(["$(ctx.arg_names[i]): $(arg_dts[i])" for i in 1:length(arg_types)], ", ")
+            ret_dts = js_type_string(return_type)
+            print(dts_buf, "export declare function $(name)($(params)): $(ret_dts);\n")
+        end
+    end
+
+    if module_format === :esm
+        print(buf, "export { $(join(export_names, ", ")) };\n")
+    end
+
+    js = String(take!(buf))
+    dts_str = String(take!(dts_buf))
+    return JSOutput(js, dts_str, "", export_names, sizeof(js))
+end
