@@ -1217,4 +1217,235 @@ process.stdout.write(String(f_isempty("hello")));
             @test parse(Float64, compile_and_run(f_poly, (Float64,), 2.0)) ≈ 17.0
         end
     end
+
+    # =====================================================
+    # PG-001: Pre-computed inference tables
+    # =====================================================
+    @testset "PG-001: Inference Tables" begin
+
+        @testset "TypeRegistry built-in IDs" begin
+            reg = JavaScriptTarget.TypeRegistry()
+            # Special types
+            @test JavaScriptTarget.get_type_id(reg, Any) == 0
+            @test JavaScriptTarget.get_type_id(reg, Union{}) == 1
+            @test JavaScriptTarget.get_type_id(reg, Nothing) == 2
+            @test JavaScriptTarget.get_type_id(reg, Missing) == 3
+            # Primitives
+            @test JavaScriptTarget.get_type_id(reg, Bool) == 4
+            @test JavaScriptTarget.get_type_id(reg, Int32) == 7
+            @test JavaScriptTarget.get_type_id(reg, Int64) == 8
+            @test JavaScriptTarget.get_type_id(reg, Float64) == 17
+            @test JavaScriptTarget.get_type_id(reg, String) == 19
+            # Abstract
+            @test JavaScriptTarget.get_type_id(reg, Number) == 21
+            @test JavaScriptTarget.get_type_id(reg, Integer) == 23
+            @test JavaScriptTarget.get_type_id(reg, AbstractFloat) == 26
+            # Containers
+            @test JavaScriptTarget.get_type_id(reg, Vector{Int64}) == 29
+            @test JavaScriptTarget.get_type_id(reg, Vector{Float64}) == 30
+            # Names
+            @test reg.id_to_name[8] == "Int64"
+            @test reg.id_to_name[17] == "Float64"
+            @test reg.id_to_name[0] == "Any"
+            # Unknown type → -1
+            @test JavaScriptTarget.get_type_id(reg, Complex{Float64}) == -1
+        end
+
+        @testset "TypeRegistry ensure_type_id!" begin
+            reg = JavaScriptTarget.TypeRegistry()
+            # Known type returns existing ID
+            @test JavaScriptTarget.ensure_type_id!(reg, Int64) == 8
+            # Unknown type gets registered
+            id = JavaScriptTarget.ensure_type_id!(reg, Complex{Float64})
+            @test id >= 0
+            @test JavaScriptTarget.get_type_id(reg, Complex{Float64}) == id
+            # Calling again returns same ID
+            @test JavaScriptTarget.ensure_type_id!(reg, Complex{Float64}) == id
+        end
+
+        @testset "FNV-1a hash" begin
+            # Empty input should return offset basis
+            @test JavaScriptTarget.fnv1a_hash(UInt8[]) == 0x811c9dc5
+            # Deterministic
+            h1 = JavaScriptTarget.composite_hash(Int32(1), Int32[8, 8])
+            h2 = JavaScriptTarget.composite_hash(Int32(1), Int32[8, 8])
+            @test h1 == h2
+            # Different inputs → different hashes (with high probability)
+            h3 = JavaScriptTarget.composite_hash(Int32(1), Int32[8, 17])
+            @test h1 != h3
+            h4 = JavaScriptTarget.composite_hash(Int32(2), Int32[8, 8])
+            @test h1 != h4
+            # Hash is non-zero for typical inputs
+            @test h1 != UInt32(0)
+        end
+
+        @testset "FuncRegistry" begin
+            fr = JavaScriptTarget.FuncRegistry()
+            id1 = JavaScriptTarget.register_func!(fr, "+")
+            id2 = JavaScriptTarget.register_func!(fr, "sin")
+            @test id1 != id2
+            # Same name → same ID
+            @test JavaScriptTarget.register_func!(fr, "+") == id1
+            # Lookup
+            @test JavaScriptTarget.get_func_id(fr, "+") == id1
+            @test JavaScriptTarget.get_func_id(fr, "unknown") == -1
+        end
+
+        @testset "Hash table insert and lookup" begin
+            table = JavaScriptTarget.InferenceHashTable(32)
+            # Insert an entry
+            func_id = Int32(0)
+            arg_ids = Int32[8, 8]  # Int64, Int64
+            ret_id = Int32(8)      # Int64
+            hash = JavaScriptTarget.composite_hash(func_id, arg_ids)
+            entry = JavaScriptTarget.HashEntry(hash, func_id, arg_ids, ret_id)
+            @test JavaScriptTarget.insert!(table, entry) == true
+            # Lookup succeeds
+            result = JavaScriptTarget.lookup(table, func_id, arg_ids)
+            @test result == ret_id
+            # Lookup with different args → not found
+            result2 = JavaScriptTarget.lookup(table, func_id, Int32[17, 17])
+            @test result2 == -1
+            # Insert more entries
+            for i in 1:20
+                fid = Int32(i)
+                aids = Int32[Int32(i + 5)]
+                h = JavaScriptTarget.composite_hash(fid, aids)
+                JavaScriptTarget.insert!(table, JavaScriptTarget.HashEntry(h, fid, aids, Int32(i * 10)))
+            end
+            @test table.count == 21
+            # All entries still retrievable
+            result3 = JavaScriptTarget.lookup(table, func_id, arg_ids)
+            @test result3 == ret_id
+        end
+
+        @testset "Method enumeration" begin
+            type_reg = JavaScriptTarget.TypeRegistry()
+            func_reg = JavaScriptTarget.FuncRegistry()
+            entries = JavaScriptTarget.enumerate_base_methods(type_reg, func_reg)
+            # Should find a substantial number of entries
+            @test length(entries) >= 200
+            # Check that +(Int64, Int64) → Int64 is present
+            plus_id = JavaScriptTarget.get_func_id(func_reg, "+")
+            int64_id = JavaScriptTarget.get_type_id(type_reg, Int64)
+            @test plus_id >= 0
+            found_plus = false
+            for e in entries
+                if e.func_id == plus_id && e.arg_type_ids == Int32[int64_id, int64_id]
+                    @test e.return_type_id == int64_id
+                    found_plus = true
+                    break
+                end
+            end
+            @test found_plus
+            # Check sin(Float64) → Float64
+            sin_id = JavaScriptTarget.get_func_id(func_reg, "sin")
+            f64_id = JavaScriptTarget.get_type_id(type_reg, Float64)
+            found_sin = false
+            for e in entries
+                if e.func_id == sin_id && e.arg_type_ids == Int32[f64_id]
+                    @test e.return_type_id == f64_id
+                    found_sin = true
+                    break
+                end
+            end
+            @test found_sin
+        end
+
+        @testset "Parametric rules" begin
+            rules = JavaScriptTarget.generate_parametric_rules()
+            @test length(rules) >= 100
+            # Check specific rule: +(T<:Number, T) → T
+            plus_rules = filter(r -> r["func"] == "+", rules)
+            @test length(plus_rules) >= 1
+            # Check comparison → Bool rule exists
+            eq_rules = filter(r -> r["func"] == "==" && get(r["returns"], "type", "") == "Bool", rules)
+            @test length(eq_rules) >= 1
+            # Check getindex(Vector{T}, Int) → T
+            getidx_rules = filter(r -> r["func"] == "getindex" && haskey(get(r["args"][1], "nothing", Dict()), "nothing") == false, rules)
+            @test length(getidx_rules) >= 1
+        end
+
+        @testset "build_inference_tables (binary)" begin
+            output = tempname() * ".bin"
+            stats = build_inference_tables(output)
+            # Stats checks
+            @test stats.num_types >= 50
+            @test stats.num_entries >= 200
+            @test stats.num_rules >= 100
+            @test stats.num_functions >= 30
+            @test stats.hash_capacity >= stats.num_entries
+            # File checks
+            @test isfile(output)
+            @test stats.file_size > 1000
+            @test stats.file_size < 10_000_000
+            # Verify magic number
+            open(output) do f
+                magic = read(f, 4)
+                @test magic == UInt8[0x4a, 0x4c, 0x54, 0x49]  # "JLTI"
+                version = read(f, UInt32)
+                @test version == 1
+            end
+            rm(output)
+        end
+
+        @testset "Serialization round-trip" begin
+            output = tempname() * ".bin"
+            stats = build_inference_tables(output)
+            # Read back and verify structure
+            data = read(output)
+            @test length(data) == stats.file_size
+            # Parse header
+            magic = data[1:4]
+            @test String(magic) == "JLTI"
+            version = reinterpret(UInt32, data[5:8])[1]
+            @test version == 1
+            json_offset = reinterpret(UInt32, data[9:12])[1]
+            json_length = reinterpret(UInt32, data[13:16])[1]
+            hash_offset = reinterpret(UInt32, data[17:20])[1]
+            hash_length = reinterpret(UInt32, data[21:24])[1]
+            # JSON section is valid-ish (starts with {)
+            json_start = json_offset + 1  # 1-based
+            json_str = String(data[json_start:json_start + json_length - 1])
+            @test startswith(json_str, "{")
+            @test endswith(json_str, "}")
+            @test occursin("\"types\":", json_str)
+            @test occursin("\"functions\":", json_str)
+            @test occursin("\"rules\":", json_str)
+            # Hash section has correct size
+            hash_start = hash_offset + 1
+            @test hash_length >= 8  # at least capacity + entry_size
+            rm(output)
+        end
+
+        @testset "Hash table + method lookup integration" begin
+            # Build tables, then verify hash table lookups match code_typed
+            type_reg = JavaScriptTarget.TypeRegistry()
+            func_reg = JavaScriptTarget.FuncRegistry()
+            entries = JavaScriptTarget.enumerate_base_methods(type_reg, func_reg)
+            table = JavaScriptTarget.InferenceHashTable(max(64, length(entries) * 2))
+            seen = Set{UInt64}()
+            for entry in entries
+                key = hash((entry.func_id, entry.arg_type_ids))
+                key in seen && continue
+                push!(seen, key)
+                JavaScriptTarget.insert!(table, entry)
+            end
+            # Verify +(Int64, Int64)
+            plus_id = JavaScriptTarget.get_func_id(func_reg, "+")
+            int64_id = JavaScriptTarget.get_type_id(type_reg, Int64)
+            ret = JavaScriptTarget.lookup(table, plus_id, Int32[int64_id, int64_id])
+            @test ret == int64_id
+            # Verify sin(Float64) → Float64
+            sin_id = JavaScriptTarget.get_func_id(func_reg, "sin")
+            f64_id = JavaScriptTarget.get_type_id(type_reg, Float64)
+            ret2 = JavaScriptTarget.lookup(table, sin_id, Int32[f64_id])
+            @test ret2 == f64_id
+            # Verify ==(Int64, Int64) → Bool
+            eq_id = JavaScriptTarget.get_func_id(func_reg, "==")
+            bool_id = JavaScriptTarget.get_type_id(type_reg, Bool)
+            ret3 = JavaScriptTarget.lookup(table, eq_id, Int32[int64_id, int64_id])
+            @test ret3 == bool_id
+        end
+    end
 end
