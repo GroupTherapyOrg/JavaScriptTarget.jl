@@ -1448,4 +1448,452 @@ process.stdout.write(String(f_isempty("hello")));
             @test ret3 == bool_id
         end
     end
+
+    @testset "PG-002: Thin inference engine (infer.js)" begin
+        # Path to infer.js
+        infer_js_path = joinpath(@__DIR__, "..", "src", "playground", "infer.js")
+        @test isfile(infer_js_path)
+
+        # Generate types.bin for all JS tests
+        types_bin = tempname() * ".bin"
+        result = build_inference_tables(types_bin)
+        @test isfile(types_bin)
+
+        @testset "FNV-1a hash matches Julia↔JS" begin
+            # Compute hash on Julia side
+            type_reg = JavaScriptTarget.TypeRegistry()
+            func_reg = JavaScriptTarget.FuncRegistry()
+            plus_id = JavaScriptTarget.register_func!(func_reg, "+")
+            int64_id = JavaScriptTarget.get_type_id(type_reg, Int64)
+            julia_hash = JavaScriptTarget.composite_hash(plus_id, Int32[int64_id, int64_id])
+
+            # Compute same hash in JS and compare
+            js_code = """
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const h = infer.compositeHash($(Int(plus_id)), [$(Int(int64_id)), $(Int(int64_id))]);
+            process.stdout.write(String(h));
+            """
+            js_result = run_js(js_code)
+            @test parse(UInt32, js_result) == julia_hash
+        end
+
+        @testset "loadTables parses types.bin" begin
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+            // Check we got types and functions
+            process.stdout.write(JSON.stringify({
+                numTypes: tables.typeByName.size,
+                numFuncs: tables.funcByName.size,
+                numRules: tables.rules.length,
+                hasInt64: tables.typeByName.has('Int64'),
+                hasPlus: tables.funcByName.has('+'),
+            }));
+            """
+            js_result = run_js(js_code)
+            parsed = let
+                # Simple JSON parsing
+                s = js_result
+                has_int64 = occursin("\"hasInt64\":true", s)
+                has_plus = occursin("\"hasPlus\":true", s)
+                num_types = parse(Int, match(r"\"numTypes\":(\d+)", s).captures[1])
+                num_funcs = parse(Int, match(r"\"numFuncs\":(\d+)", s).captures[1])
+                num_rules = parse(Int, match(r"\"numRules\":(\d+)", s).captures[1])
+                (; num_types, num_funcs, num_rules, has_int64, has_plus)
+            end
+            @test parsed.num_types >= 40
+            @test parsed.num_funcs >= 50
+            @test parsed.num_rules >= 100
+            @test parsed.has_int64
+            @test parsed.has_plus
+        end
+
+        @testset "Tier 1: Hash table lookup in JS" begin
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            // +(Int64, Int64) → Int64
+            const plusId = tables.funcByName.get('+');
+            const int64Id = tables.typeByName.get('Int64');
+            const ret1 = infer.hashLookup(tables, plusId, [int64Id, int64Id]);
+
+            // sin(Float64) → Float64
+            const sinId = tables.funcByName.get('sin');
+            const f64Id = tables.typeByName.get('Float64');
+            const ret2 = infer.hashLookup(tables, sinId, [f64Id]);
+
+            // ==(Int64, Int64) → Bool
+            const eqId = tables.funcByName.get('==');
+            const boolId = tables.typeByName.get('Bool');
+            const ret3 = infer.hashLookup(tables, eqId, [int64Id, int64Id]);
+
+            process.stdout.write(JSON.stringify({
+                plus_ret: ret1, plus_expect: int64Id,
+                sin_ret: ret2, sin_expect: f64Id,
+                eq_ret: ret3, eq_expect: boolId,
+            }));
+            """
+            js_result = run_js(js_code)
+            # +(Int64,Int64) → Int64
+            @test occursin(r"\"plus_ret\":(\d+).*\"plus_expect\":\1", js_result) ||
+                  let m1 = match(r"\"plus_ret\":(\d+)", js_result),
+                      m2 = match(r"\"plus_expect\":(\d+)", js_result)
+                      m1.captures[1] == m2.captures[1]
+                  end
+            # sin(Float64) → Float64
+            @test let m1 = match(r"\"sin_ret\":(\d+)", js_result),
+                     m2 = match(r"\"sin_expect\":(\d+)", js_result)
+                     m1.captures[1] == m2.captures[1]
+                 end
+            # ==(Int64,Int64) → Bool
+            @test let m1 = match(r"\"eq_ret\":(\d+)", js_result),
+                     m2 = match(r"\"eq_expect\":(\d+)", js_result)
+                     m1.captures[1] == m2.captures[1]
+                 end
+        end
+
+        @testset "Tier 2: Parametric rules in JS" begin
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            // sin(Int32) → Float64 (parametric rule: sin(Integer) → Float64)
+            const int32Id = tables.typeByName.get('Int32');
+            const f64Id = tables.typeByName.get('Float64');
+            const ret1 = infer.matchRules(tables, 'sin', [int32Id]);
+
+            // ==(Any, Any) → Bool (parametric rule)
+            const boolId = tables.typeByName.get('Bool');
+            const strId = tables.typeByName.get('String');
+            const ret2 = infer.matchRules(tables, '==', [strId, strId]);
+
+            // string(Any) → String
+            const anyId = 0;
+            const ret3 = infer.matchRules(tables, 'string', [int32Id]);
+
+            process.stdout.write([ret1, f64Id, ret2, boolId, ret3, strId].join(','));
+            """
+            js_result = run_js(js_code)
+            vals = parse.(Int, split(js_result, ","))
+            @test vals[1] == vals[2]  # sin(Int32) → Float64
+            @test vals[3] == vals[4]  # ==(String,String) → Bool
+            @test vals[5] == vals[6]  # string(Int32) → String
+        end
+
+        @testset "Forward SSA: f(x) = x * x + 1" begin
+            # IR for: f(x::Int64) = x * x + 1
+            # SSA 0: x * x  (CALL "*", [arg0, arg0])
+            # SSA 1: lit 1  (LITERAL Int64)
+            # SSA 2: _0 + 1 (CALL "+", [ssa0, ssa1])
+            # SSA 3: return  (RETURN ssa2)
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            const int64Id = tables.typeByName.get('Int64');
+            const func = {
+                code: [
+                    { kind: 1, callee: '*', args: [{arg: 0}, {arg: 0}] },
+                    { kind: 5, typeId: int64Id },
+                    { kind: 1, callee: '+', args: [{ssa: 0}, {ssa: 1}] },
+                    { kind: 6, val: {ssa: 2} },
+                ],
+                argCount: 1
+            };
+
+            const ssaTypes = infer.inferFunction(func, [int64Id], tables);
+            process.stdout.write(JSON.stringify({
+                ssa0: ssaTypes[0],
+                ssa1: ssaTypes[1],
+                ssa2: ssaTypes[2],
+                ssa3: ssaTypes[3],
+                int64Id: int64Id,
+            }));
+            """
+            js_result = run_js(js_code)
+            # All SSAs should be Int64
+            m = match(r"\"int64Id\":(\d+)", js_result)
+            int64_str = m.captures[1]
+            @test occursin("\"ssa0\":$(int64_str)", js_result)
+            @test occursin("\"ssa1\":$(int64_str)", js_result)
+            @test occursin("\"ssa2\":$(int64_str)", js_result)
+            @test occursin("\"ssa3\":$(int64_str)", js_result)
+        end
+
+        @testset "Forward SSA: f(x::Float64) = sin(x) + cos(x)" begin
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            const f64Id = tables.typeByName.get('Float64');
+            const func = {
+                code: [
+                    { kind: 1, callee: 'sin', args: [{arg: 0}] },
+                    { kind: 1, callee: 'cos', args: [{arg: 0}] },
+                    { kind: 1, callee: '+', args: [{ssa: 0}, {ssa: 1}] },
+                    { kind: 6, val: {ssa: 2} },
+                ],
+                argCount: 1
+            };
+
+            const ret = infer.inferReturnType(func, [f64Id], tables);
+            process.stdout.write(String(ret === f64Id));
+            """
+            @test run_js(js_code) == "true"
+        end
+
+        @testset "PhiNode inference: if/else merge" begin
+            # f(x::Int64) = x > 0 ? x : -x
+            # SSA 0: x > 0     (CALL ">", [arg0, lit(Int64)])
+            # SSA 1: gotoifnot (GOTOIFNOT cond=ssa0, dest=4)
+            # SSA 2: -x        (CALL "-_unary", [arg0])  (true branch)
+            # SSA 3: goto      (GOTO dest=5)
+            # SSA 4: -x neg    (CALL "-_unary", [arg0])  (false branch → abs)
+            # SSA 5: phi       (PHI edges from true/false)
+            # SSA 6: return    (RETURN ssa5)
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            const int64Id = tables.typeByName.get('Int64');
+            const boolId = tables.typeByName.get('Bool');
+            const func = {
+                code: [
+                    { kind: 1, callee: '>', args: [{arg: 0}, {lit: int64Id}] },
+                    { kind: 8, cond: {ssa: 0}, dest: 4 },
+                    { kind: 5, typeId: int64Id },
+                    { kind: 7, dest: 5 },
+                    { kind: 1, callee: '-_unary', args: [{arg: 0}] },
+                    { kind: 2, edges: [{from: 3, val: {ssa: 2}}, {from: 4, val: {ssa: 4}}] },
+                    { kind: 6, val: {ssa: 5} },
+                ],
+                argCount: 1
+            };
+
+            const ssaTypes = infer.inferFunction(func, [int64Id], tables);
+            const retType = ssaTypes[6];
+            process.stdout.write(String(retType === int64Id));
+            """
+            @test run_js(js_code) == "true"
+        end
+
+        @testset "Union type handling" begin
+            js_code = """
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+
+            // joinTypes basics
+            const a = infer.joinTypes(infer.UNKNOWN, 8);  // UNKNOWN + Int64 → Int64
+            const b = infer.joinTypes(8, 8);               // Int64 + Int64 → Int64
+            const c = infer.joinTypes(8, 17);              // Int64 + Float64 → [8,17]
+            const d = infer.joinTypes(infer.TYPE_ANY, 8);  // Any + anything → Any
+            const e = infer.joinTypes(infer.TYPE_BOTTOM, 8); // Bottom + Int64 → Int64
+            const f = infer.joinTypes([7, 8], 17);         // [Int32,Int64] + Float64 → [7,8,17]
+
+            process.stdout.write(JSON.stringify({
+                a: a,
+                b: b,
+                c: JSON.stringify(c),
+                d: d,
+                e: e,
+                f_len: Array.isArray(f) ? f.length : -1,
+            }));
+            """
+            js_result = run_js(js_code)
+            @test occursin("\"a\":8", js_result)           # UNKNOWN + 8 → 8
+            @test occursin("\"b\":8", js_result)           # 8 + 8 → 8
+            @test occursin("\"c\":\"[8,17]\"", js_result)  # union
+            @test occursin("\"d\":0", js_result)           # Any
+            @test occursin("\"e\":8", js_result)           # Bottom + 8 → 8
+            @test occursin("\"f_len\":3", js_result)       # 3-element union
+        end
+
+        @testset "Union cap at MAX_UNION → Any" begin
+            js_code = """
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            // Join 5 different types → exceeds MAX_UNION (4) → Any
+            let t = infer.joinTypes(5, 6);   // [Int8, Int16]
+            t = infer.joinTypes(t, 7);       // [Int8, Int16, Int32]
+            t = infer.joinTypes(t, 8);       // [Int8, Int16, Int32, Int64]
+            t = infer.joinTypes(t, 17);      // 5 types → Any
+            process.stdout.write(String(t));
+            """
+            @test run_js(js_code) == "0"  # TYPE_ANY
+        end
+
+        @testset "PiNode type narrowing" begin
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            const int64Id = tables.typeByName.get('Int64');
+            // SSA 0: literal int64
+            // SSA 1: PiNode narrowing to Int64
+            // SSA 2: return ssa1
+            const func = {
+                code: [
+                    { kind: 5, typeId: int64Id },
+                    { kind: 9, val: {ssa: 0}, typeId: int64Id },
+                    { kind: 6, val: {ssa: 1} },
+                ],
+                argCount: 0
+            };
+
+            const ret = infer.inferReturnType(func, [], tables);
+            process.stdout.write(String(ret === int64Id));
+            """
+            @test run_js(js_code) == "true"
+        end
+
+        @testset "Loop fixed-point: sum 1 to n" begin
+            # f(n::Int64): i=1, s=0; while i<=n: s+=i; i+=1; return s
+            # SSA 0: lit 1 (Int64)
+            # SSA 1: lit 0 (Int64)
+            # SSA 2: phi i (from init and loop back)
+            # SSA 3: phi s (from init and loop back)
+            # SSA 4: i <= n (CALL "<=", [ssa2, arg0])
+            # SSA 5: gotoifnot ssa4, dest=10
+            # SSA 6: s + i (CALL "+", [ssa3, ssa2])
+            # SSA 7: lit 1 (Int64)
+            # SSA 8: i + 1 (CALL "+", [ssa2, ssa7])
+            # SSA 9: goto 2
+            # SSA 10: return ssa3
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            const int64Id = tables.typeByName.get('Int64');
+            const func = {
+                code: [
+                    { kind: 5, typeId: int64Id },
+                    { kind: 5, typeId: int64Id },
+                    { kind: 2, edges: [{from: 0, val: {ssa: 0}}, {from: 9, val: {ssa: 8}}] },
+                    { kind: 2, edges: [{from: 1, val: {ssa: 1}}, {from: 9, val: {ssa: 6}}] },
+                    { kind: 1, callee: '<=', args: [{ssa: 2}, {arg: 0}] },
+                    { kind: 8, cond: {ssa: 4}, dest: 10 },
+                    { kind: 1, callee: '+', args: [{ssa: 3}, {ssa: 2}] },
+                    { kind: 5, typeId: int64Id },
+                    { kind: 1, callee: '+', args: [{ssa: 2}, {ssa: 7}] },
+                    { kind: 7, dest: 2 },
+                    { kind: 6, val: {ssa: 3} },
+                ],
+                argCount: 1
+            };
+
+            const ssaTypes = infer.inferFunction(func, [int64Id], tables);
+            // All phi nodes and arithmetic should be Int64
+            const allInt64 = ssaTypes[2] === int64Id && ssaTypes[3] === int64Id &&
+                             ssaTypes[6] === int64Id && ssaTypes[8] === int64Id &&
+                             ssaTypes[10] === int64Id;
+            process.stdout.write(String(allInt64));
+            """
+            @test run_js(js_code) == "true"
+        end
+
+        @testset "inferReturnType: mixed types" begin
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            const int64Id = tables.typeByName.get('Int64');
+            const strId = tables.typeByName.get('String');
+
+            // Function with two return paths: returns Int64 or String
+            const func = {
+                code: [
+                    { kind: 1, callee: '>', args: [{arg: 0}, {lit: int64Id}] },
+                    { kind: 8, cond: {ssa: 0}, dest: 4 },
+                    { kind: 6, val: {arg: 0} },
+                    { kind: 7, dest: 5 },
+                    { kind: 6, val: {lit: strId} },
+                    { kind: 5, typeId: int64Id },
+                ],
+                argCount: 1
+            };
+
+            const ret = infer.inferReturnType(func, [int64Id], tables);
+            // Should be union [Int64, String] or Any
+            const isUnion = Array.isArray(ret) && ret.includes(int64Id) && ret.includes(strId);
+            process.stdout.write(String(isUnion));
+            """
+            @test run_js(js_code) == "true"
+        end
+
+        @testset "isa special-casing returns Bool" begin
+            js_code = """
+            const fs = require('fs');
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const buf = fs.readFileSync('$(replace(types_bin, "\\" => "\\\\"))');
+            const tables = infer.loadTables(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+            const int64Id = tables.typeByName.get('Int64');
+            const boolId = tables.typeByName.get('Bool');
+            const func = {
+                code: [
+                    { kind: 1, callee: 'isa', args: [{arg: 0}, {lit: int64Id}] },
+                    { kind: 6, val: {ssa: 0} },
+                ],
+                argCount: 1
+            };
+
+            const ssaTypes = infer.inferFunction(func, [int64Id], tables);
+            process.stdout.write(String(ssaTypes[0] === boolId));
+            """
+            @test run_js(js_code) == "true"
+        end
+
+        @testset "User method table" begin
+            js_code = """
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const umt = infer.createUserMethodTable();
+
+            // Register a user function: myfunc(Int64) → Float64
+            umt.register('myfunc', [8], 17);
+            const ret = umt.lookup('myfunc', [8]);
+            const miss = umt.lookup('myfunc', [19]);  // Wrong arg type
+
+            process.stdout.write(JSON.stringify({ret: ret, miss: miss}));
+            """
+            js_result = run_js(js_code)
+            @test occursin("\"ret\":17", js_result)    # Found: Float64
+            @test occursin("\"miss\":-1", js_result)   # Not found
+        end
+
+        @testset "typesEqual utility" begin
+            js_code = """
+            const infer = require('$(replace(infer_js_path, "\\" => "\\\\"))');
+            const results = [
+                infer.typesEqual(8, 8),           // true: same scalar
+                infer.typesEqual(8, 17),          // false: different scalar
+                infer.typesEqual([7,8], [7,8]),   // true: same array
+                infer.typesEqual([7,8], [7,9]),   // false: different array
+                infer.typesEqual(8, [8]),          // false: scalar vs array
+                infer.typesEqual(-1, -1),         // true: UNKNOWN
+            ];
+            process.stdout.write(results.map(String).join(','));
+            """
+            @test run_js(js_code) == "true,false,true,false,false,true"
+        end
+
+        # Clean up
+        isfile(types_bin) && rm(types_bin)
+    end
 end
