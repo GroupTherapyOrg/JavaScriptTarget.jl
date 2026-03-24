@@ -525,6 +525,12 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             end
         end
 
+        # Integer field access on tuples: getfield(t, 1) → t[0]
+        if field_arg isa Int64 || field_arg isa Int32
+            obj_val = compile_value(ctx, obj)
+            return "$(obj_val)[$(field_arg - 1)]"
+        end
+
         # General field access
         obj_val = compile_value(ctx, obj)
         field_name = if field_arg isa QuoteNode && field_arg.value isa Symbol

@@ -534,4 +534,46 @@ process.stdout.write(String(f_vlen([])));
 """
         @test run_js(js5) == "0"
     end
+
+    @testset "CO-004: Tuple basics" begin
+        # Tuple creation
+        f_mktuple(a::Int32, b::Float64) = (a, b)
+        result = compile(f_mktuple, (Int32, Float64); module_format=:none)
+        js = """
+$(result.js)
+const t = f_mktuple(42, 3.14);
+process.stdout.write(t[0] + "," + t[1]);
+"""
+        @test run_js(js) == "42,3.14"
+
+        # Tuple element access
+        f_first(t::Tuple{Int32, Float64})::Int32 = t[1]
+        result2 = compile(f_first, (Tuple{Int32, Float64},); module_format=:none)
+        js2 = """
+$(result2.js)
+process.stdout.write(String(f_first([10, 3.14])));
+"""
+        @test run_js(js2) == "10"
+
+        # Tuple second element
+        f_second(t::Tuple{Int32, Float64})::Float64 = t[2]
+        result3 = compile(f_second, (Tuple{Int32, Float64},); module_format=:none)
+        js3 = """
+$(result3.js)
+process.stdout.write(String(f_second([10, 3.14])));
+"""
+        @test run_js(js3) == "3.14"
+
+        # Tuple in function return
+        function f_swap(a::Int32, b::Int32)
+            return (b, a)
+        end
+        result4 = compile(f_swap, (Int32, Int32); module_format=:none)
+        js4 = """
+$(result4.js)
+const r = f_swap(1, 2);
+process.stdout.write(r[0] + "," + r[1]);
+"""
+        @test run_js(js4) == "2,1"
+    end
 end
