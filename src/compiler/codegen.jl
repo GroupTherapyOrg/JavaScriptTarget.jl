@@ -481,8 +481,8 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         end
     end
 
-    # Handle Core.getfield for captured closure variables
-    if callee isa GlobalRef && callee.mod === Core && callee.name === :getfield
+    # Handle Core.getfield / Base.getfield for captured closure variables and struct fields
+    if callee isa GlobalRef && callee.name === :getfield && (callee.mod === Core || callee.mod === Base)
         obj = args[2]
         field_arg = args[3]
         # Closure captured variable: getfield(self, :name)
@@ -500,6 +500,19 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             compile_value(ctx, field_arg)
         end
         return "$(obj_val).$(field_name)"
+    end
+
+    # Handle Base.setfield! for mutable structs
+    if callee isa GlobalRef && callee.name === :setfield! && (callee.mod === Core || callee.mod === Base)
+        obj = compile_value(ctx, args[2])
+        field_arg = args[3]
+        field_name = if field_arg isa QuoteNode && field_arg.value isa Symbol
+            string(field_arg.value)
+        else
+            compile_value(ctx, field_arg)
+        end
+        val = compile_value(ctx, args[4])
+        return "$(obj).$(field_name) = $(val)"
     end
 
     # Handle not_int called as a builtin (boolean negation)
@@ -568,18 +581,40 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
 end
 
 """
-Compile a :new expression. Handles closure creation and (later) struct construction.
+Compile a :new expression. Handles closure creation and struct construction.
 """
 function compile_new_expr(ctx::JSCompilationContext, expr::Expr)
-    T = expr.args[1]
-    captured_args = expr.args[2:end]
+    T_ref = expr.args[1]
+    field_args = expr.args[2:end]
+
+    # Resolve type: could be a DataType, GlobalRef, or Argument
+    T = if T_ref isa DataType
+        T_ref
+    elseif T_ref isa GlobalRef
+        try getfield(T_ref.mod, T_ref.name) catch; nothing end
+    elseif T_ref isa Core.Argument
+        # In constructors, Argument(1) is the type — get from arg_types context
+        nothing  # Can't resolve at compile time from within the constructor
+    else
+        nothing
+    end
 
     if T isa DataType && T <: Function
-        return compile_closure_creation(ctx, T, captured_args)
-    else
-        # Struct construction (ST-001)
+        return compile_closure_creation(ctx, T, field_args)
+    elseif T isa DataType
+        # Struct construction: register the type and emit new
+        push!(ctx.struct_types, T)
         type_name = string(nameof(T))
-        args_js = [compile_value(ctx, a) for a in captured_args]
+        args_js = [compile_value(ctx, a) for a in field_args]
+        return "new $(type_name)($(join(args_js, ", ")))"
+    else
+        # Fallback: try to get type name from GlobalRef
+        type_name = if T_ref isa GlobalRef
+            string(T_ref.name)
+        else
+            "UnknownType"
+        end
+        args_js = [compile_value(ctx, a) for a in field_args]
         return "new $(type_name)($(join(args_js, ", ")))"
     end
 end
@@ -632,6 +667,25 @@ function compile_closure_creation(ctx::JSCompilationContext, T::DataType, captur
 
     # compile_function emits "function (args) { ... }\n" (empty name)
     return strip(js_body)
+end
+
+"""
+Generate ES6 class definition for a Julia struct type.
+"""
+function generate_struct_class(T::DataType)
+    name = string(nameof(T))
+    fnames = fieldnames(T)
+    buf = IOBuffer()
+    print(buf, "class $(name) {\n")
+    # Constructor
+    args_str = join([string(f) for f in fnames], ", ")
+    print(buf, "  constructor($(args_str)) {\n")
+    for f in fnames
+        print(buf, "    this.$(f) = $(f);\n")
+    end
+    print(buf, "  }\n")
+    print(buf, "}\n")
+    return String(take!(buf))
 end
 
 """
@@ -827,9 +881,23 @@ function compile(f, arg_types::Tuple;
     func_name::Union{String, Nothing}=nothing,
 )
     code_info, return_type = get_typed_ir(f, arg_types; optimize=optimize)
-    name = something(func_name, string(nameof(f)))
+    name = sanitize_js_name(something(func_name, string(nameof(f))))
     ctx = JSCompilationContext(code_info, arg_types, return_type, name)
+
+    # Register struct types from function arguments
+    for T in arg_types
+        if T isa DataType && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing && !(T <: Function)
+            push!(ctx.struct_types, T)
+        end
+    end
+
     js_body = compile_function(ctx)
+
+    # Prepend struct class definitions if any
+    struct_defs = join([generate_struct_class(T) for T in ctx.struct_types], "\n")
+    if !isempty(struct_defs)
+        js_body = struct_defs * "\n" * js_body
+    end
 
     js = if module_format === :esm
         "export " * js_body
@@ -866,6 +934,7 @@ function compile_module(functions::Vector;
     buf = IOBuffer()
     dts_buf = IOBuffer()
     export_names = String[]
+    all_struct_types = Set{DataType}()
 
     for entry in functions
         f, arg_types, name = entry
@@ -873,6 +942,7 @@ function compile_module(functions::Vector;
         code_info, return_type = get_typed_ir(f, arg_tuple; optimize=optimize)
         ctx = JSCompilationContext(code_info, arg_tuple, return_type, name)
         js_body = compile_function(ctx)
+        union!(all_struct_types, ctx.struct_types)
         print(buf, js_body)
         print(buf, "\n")
         push!(export_names, name)
@@ -889,7 +959,13 @@ function compile_module(functions::Vector;
         print(buf, "export { $(join(export_names, ", ")) };\n")
     end
 
-    js = String(take!(buf))
+    # Prepend struct class definitions
+    js_body_str = String(take!(buf))
+    if !isempty(all_struct_types)
+        struct_defs = join([generate_struct_class(T) for T in all_struct_types], "\n")
+        js_body_str = struct_defs * "\n" * js_body_str
+    end
+    js = js_body_str
     dts_str = String(take!(dts_buf))
     return JSOutput(js, dts_str, "", export_names, sizeof(js))
 end

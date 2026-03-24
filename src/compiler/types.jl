@@ -23,6 +23,7 @@ mutable struct JSCompilationContext
     local_counter::Int
     indent::Int
     captured_vars::Dict{Symbol, String}  # For closures: field_name → JS expression
+    struct_types::Set{DataType}          # Struct types that need class definitions
 end
 
 function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return_type::Type, func_name::String)
@@ -51,6 +52,7 @@ function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return
         0,
         1,
         Dict{Symbol, String}(),
+        Set{DataType}(),
     )
 end
 
@@ -62,6 +64,17 @@ function get_local!(ctx::JSCompilationContext, ssa_id::Int)
         ctx.local_counter += 1
         "_v$(ctx.local_counter)"
     end
+end
+
+"""
+Sanitize a Julia name for use as a JS identifier.
+"""
+function sanitize_js_name(name::String)
+    # Replace ! with _b (bang)
+    name = replace(name, "!" => "_b")
+    # Replace # with _
+    name = replace(name, "#" => "_")
+    return name
 end
 
 """

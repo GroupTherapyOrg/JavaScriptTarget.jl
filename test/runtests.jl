@@ -354,4 +354,60 @@ process.stdout.write(String(f_apply_twice(Math.sin, 1.0)));
         f_log(x::Float64) = log(x)
         @test parse(Float64, compile_and_run(f_log, (Float64,), 1.0)) ≈ 0.0
     end
+
+    @testset "ST-001: Immutable and mutable structs" begin
+        # Immutable struct: field access
+        struct TestPoint
+            x::Float64
+            y::Float64
+        end
+        f_getx(p::TestPoint) = p.x
+        result = compile(f_getx, (TestPoint,); module_format=:none)
+        js_code = """
+$(result.js)
+const p = new TestPoint(3.0, 4.0);
+process.stdout.write(String(f_getx(p)));
+"""
+        @test run_js(js_code) == "3"
+
+        # Struct construction + field access
+        f_add_pts(a::TestPoint, b::TestPoint) = TestPoint(a.x + b.x, a.y + b.y)
+        result2 = compile(f_add_pts, (TestPoint, TestPoint); module_format=:none)
+        js_code2 = """
+$(result2.js)
+const r = f_add_pts(new TestPoint(1.0, 2.0), new TestPoint(3.0, 4.0));
+process.stdout.write(r.x + "," + r.y);
+"""
+        @test run_js(js_code2) == "4,6"
+
+        # Mutable struct with setfield!
+        mutable struct TestMPoint
+            x::Float64
+            y::Float64
+        end
+        function f_move_mut!(p::TestMPoint, dx::Float64)::Nothing
+            p.x += dx
+            return nothing
+        end
+        result3 = compile(f_move_mut!, (TestMPoint, Float64); module_format=:none)
+        # Function name ! → _b in JS
+        js_code3 = """
+$(result3.js)
+const p = new TestMPoint(1.0, 2.0);
+f_move_mut_b(p, 5.0);
+process.stdout.write(String(p.x));
+"""
+        @test run_js(js_code3) == "6"
+
+        # Class definition is generated
+        @test occursin("class TestPoint", result2.js)
+        @test occursin("constructor", result2.js)
+
+        # Struct distance function
+        f_dist(p::TestPoint) = p.x * p.x + p.y * p.y
+        @test run_js("""
+$(compile(f_dist, (TestPoint,); module_format=:none).js)
+process.stdout.write(String(f_dist(new TestPoint(3.0, 4.0))));
+""") == "25"
+    end
 end
