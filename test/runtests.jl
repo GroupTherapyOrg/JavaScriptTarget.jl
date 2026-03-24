@@ -446,4 +446,51 @@ $(compile(f_unbox, (TestBox{Int32},); module_format=:none).js)
 process.stdout.write(String(f_unbox(new TestBox(99))));
 """) == "99"
     end
+
+    @testset "ST-003: typeof, isa, dispatch" begin
+        struct TestCircle
+            radius::Float64
+        end
+        struct TestRect
+            w::Float64
+            h::Float64
+        end
+
+        # isa check for struct types
+        f_is_circle(s::Union{TestCircle, TestRect}) = isa(s, TestCircle)
+        result = compile(f_is_circle, (Union{TestCircle, TestRect},); module_format=:none)
+        @test occursin("instanceof", result.js)
+        js_code = """
+$(result.js)
+process.stdout.write(String(f_is_circle(new TestCircle(5.0))));
+"""
+        @test run_js(js_code) == "true"
+        js_code2 = """
+$(result.js)
+process.stdout.write(String(f_is_circle(new TestRect(3.0, 4.0))));
+"""
+        @test run_js(js_code2) == "false"
+
+        # Union dispatch via isa + if/else
+        function f_area(s::Union{TestCircle, TestRect})::Float64
+            if isa(s, TestCircle)
+                return 3.14159 * s.radius * s.radius
+            else
+                return s.w * s.h
+            end
+        end
+        result3 = compile(f_area, (Union{TestCircle, TestRect},); module_format=:none)
+        js_code3 = """
+$(result3.js)
+process.stdout.write(String(f_area(new TestRect(3.0, 4.0))));
+"""
+        @test run_js(js_code3) == "12"
+
+        js_code4 = """
+$(result3.js)
+const a = f_area(new TestCircle(1.0));
+process.stdout.write(a.toFixed(5));
+"""
+        @test run_js(js_code4) == "3.14159"
+    end
 end

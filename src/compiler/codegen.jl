@@ -478,6 +478,11 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             return "typeof $(x_val) === \"string\""
         elseif T === Bool
             return "typeof $(x_val) === \"boolean\""
+        elseif T isa DataType && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing
+            # Struct type: use instanceof
+            type_name = string(nameof(T))
+            push!(ctx.struct_types, T)
+            return "$(x_val) instanceof $(type_name)"
         end
     end
 
@@ -667,6 +672,18 @@ function compile_closure_creation(ctx::JSCompilationContext, T::DataType, captur
 
     # compile_function emits "function (args) { ... }\n" (empty name)
     return strip(js_body)
+end
+
+"""
+Register struct types that need class definitions, decomposing Union types.
+"""
+function register_struct_types!(ctx::JSCompilationContext, T)
+    if T isa Union
+        register_struct_types!(ctx, T.a)
+        register_struct_types!(ctx, T.b)
+    elseif T isa DataType && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing && !(T <: Function)
+        push!(ctx.struct_types, T)
+    end
 end
 
 """
@@ -884,11 +901,9 @@ function compile(f, arg_types::Tuple;
     name = sanitize_js_name(something(func_name, string(nameof(f))))
     ctx = JSCompilationContext(code_info, arg_types, return_type, name)
 
-    # Register struct types from function arguments
+    # Register struct types from function arguments (including Union members)
     for T in arg_types
-        if T isa DataType && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing && !(T <: Function)
-            push!(ctx.struct_types, T)
-        end
+        register_struct_types!(ctx, T)
     end
 
     js_body = compile_function(ctx)
