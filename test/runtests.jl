@@ -410,4 +410,40 @@ $(compile(f_dist, (TestPoint,); module_format=:none).js)
 process.stdout.write(String(f_dist(new TestPoint(3.0, 4.0))));
 """) == "25"
     end
+
+    @testset "ST-002: Parametric types (type erasure)" begin
+        struct TestBox{T}
+            value::T
+        end
+
+        # Int32 box
+        f_box_int(x::Int32) = TestBox{Int32}(x)
+        result = compile(f_box_int, (Int32,); module_format=:none)
+        @test occursin("class TestBox", result.js)
+        js_code = """
+$(result.js)
+const b = f_box_int(42);
+process.stdout.write(String(b.value));
+"""
+        @test run_js(js_code) == "42"
+
+        # String box
+        f_box_str(s::String) = TestBox{String}(s)
+        result2 = compile(f_box_str, (String,); module_format=:none)
+        # Same class name (type erasure)
+        @test occursin("class TestBox", result2.js)
+        js_code2 = """
+$(result2.js)
+const b = f_box_str("hello");
+process.stdout.write(b.value);
+"""
+        @test run_js(js_code2) == "hello"
+
+        # Unbox
+        f_unbox(b::TestBox{Int32}) = b.value
+        @test run_js("""
+$(compile(f_unbox, (TestBox{Int32},); module_format=:none).js)
+process.stdout.write(String(f_unbox(new TestBox(99))));
+""") == "99"
+    end
 end
