@@ -410,7 +410,11 @@ function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
             print(buf, "$(indent)$(result);\n")
         end
     elseif expr.head === :boundscheck
-        # Bounds check marker — skip in JS
+        # Bounds check: always false in JS (skip bounds checking)
+        if haskey(ctx.js_locals, idx)
+            name = ctx.js_locals[idx]
+            print(buf, "$(indent)$(name) = false;\n")
+        end
     end
 end
 
@@ -497,7 +501,31 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 return ctx.captured_vars[fname]
             end
         end
-        # General field access (for future struct support)
+        # Vector length: getfield(getfield(v, :size), 1, boundscheck) → v.length
+        if obj isa Core.SSAValue && field_arg isa Int64
+            obj_stmt = ctx.code_info.code[obj.id]
+            if obj_stmt isa Expr && obj_stmt.head === :call
+                obj_callee = obj_stmt.args[1]
+                if obj_callee isa GlobalRef && obj_callee.name === :getfield
+                    inner_field = obj_stmt.args[3]
+                    if inner_field isa QuoteNode && inner_field.value === :size
+                        # This is getfield(getfield(v, :size), 1) → v.length
+                        arr_val = compile_value(ctx, obj_stmt.args[2])
+                        return "$(arr_val).length"
+                    end
+                end
+            end
+        end
+
+        # Skip internal Vector fields (ref, size, etc.)
+        if field_arg isa QuoteNode && field_arg.value in (:ref, :size, :mem, :length)
+            obj_type = _get_ssa_type(ctx, obj)
+            if obj_type !== nothing && (obj_type <: AbstractArray || obj_type <: Memory)
+                return "/* internal: $(field_arg.value) */ undefined"
+            end
+        end
+
+        # General field access
         obj_val = compile_value(ctx, obj)
         field_name = if field_arg isa QuoteNode && field_arg.value isa Symbol
             string(field_arg.value)
@@ -505,6 +533,56 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             compile_value(ctx, field_arg)
         end
         return "$(obj_val).$(field_name)"
+    end
+
+    # Handle array memory operations (Julia 1.12 memoryref model)
+    if callee isa GlobalRef && callee.mod === Base
+        if callee.name === :memoryrefget
+            # memoryrefget(ref, :not_atomic, false) → array element read
+            # Trace back: ref = memoryrefnew(base, idx, false), base = getfield(arr, :ref)
+            ref_ssa = args[2]
+            if ref_ssa isa Core.SSAValue
+                ref_stmt = ctx.code_info.code[ref_ssa.id]
+                if ref_stmt isa Expr && ref_stmt.head === :call
+                    ref_callee = ref_stmt.args[1]
+                    if ref_callee isa GlobalRef && ref_callee.name === :memoryrefnew
+                        base_ref = ref_stmt.args[2]
+                        idx_val = ref_stmt.args[3]
+                        # base_ref should be getfield(arr, :ref)
+                        arr_js = _trace_array_ref(ctx, base_ref)
+                        if arr_js !== nothing
+                            idx_js = compile_value(ctx, idx_val)
+                            return "$(arr_js)[($(idx_js)) - 1]"
+                        end
+                    end
+                end
+            end
+        elseif callee.name === :memoryrefset!
+            # memoryrefset!(ref, val, :not_atomic, false) → array element write
+            ref_ssa = args[2]
+            new_val = args[3]
+            if ref_ssa isa Core.SSAValue
+                ref_stmt = ctx.code_info.code[ref_ssa.id]
+                if ref_stmt isa Expr && ref_stmt.head === :call
+                    ref_callee = ref_stmt.args[1]
+                    if ref_callee isa GlobalRef && ref_callee.name === :memoryrefnew
+                        base_ref = ref_stmt.args[2]
+                        idx_val = ref_stmt.args[3]
+                        arr_js = _trace_array_ref(ctx, base_ref)
+                        if arr_js !== nothing
+                            idx_js = compile_value(ctx, idx_val)
+                            val_js = compile_value(ctx, new_val)
+                            return "$(arr_js)[($(idx_js)) - 1] = $(val_js)"
+                        end
+                    end
+                end
+            end
+        elseif callee.name === :memoryrefnew
+            # Usually consumed by memoryrefget/set — skip
+            return "undefined /* memoryrefnew */"
+        elseif callee.name === :memoryrefoffset
+            return "undefined /* memoryrefoffset */"
+        end
     end
 
     # Handle Base.setfield! for mutable structs
@@ -518,6 +596,12 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         end
         val = compile_value(ctx, args[4])
         return "$(obj).$(field_name) = $(val)"
+    end
+
+    # Handle Core.tuple
+    if callee isa GlobalRef && callee.mod === Core && callee.name === :tuple
+        vals = [compile_value(ctx, a) for a in args[2:end]]
+        return "[$(join(vals, ", "))]"
     end
 
     # Handle not_int called as a builtin (boolean negation)
@@ -675,13 +759,50 @@ function compile_closure_creation(ctx::JSCompilationContext, T::DataType, captur
 end
 
 """
+Trace an SSA value back to find the array it references.
+Returns a JS expression for the array, or nothing if can't trace.
+"""
+function _trace_array_ref(ctx::JSCompilationContext, val)
+    if val isa Core.SSAValue
+        stmt = ctx.code_info.code[val.id]
+        if stmt isa Expr && stmt.head === :call
+            callee = stmt.args[1]
+            # getfield(arr, :ref) → the array
+            if callee isa GlobalRef && callee.name === :getfield
+                obj = stmt.args[2]
+                field = stmt.args[3]
+                if field isa QuoteNode && field.value === :ref
+                    return compile_value(ctx, obj)
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+"""
+Get the SSA type of a value from the context.
+"""
+function _get_ssa_type(ctx::JSCompilationContext, val)
+    if val isa Core.SSAValue && val.id <= length(ctx.ssa_types)
+        return ctx.ssa_types[val.id]
+    elseif val isa Core.Argument
+        idx = val.n - 1
+        if idx >= 1 && idx <= length(ctx.arg_types)
+            return ctx.arg_types[idx]
+        end
+    end
+    return nothing
+end
+
+"""
 Register struct types that need class definitions, decomposing Union types.
 """
 function register_struct_types!(ctx::JSCompilationContext, T)
     if T isa Union
         register_struct_types!(ctx, T.a)
         register_struct_types!(ctx, T.b)
-    elseif T isa DataType && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing && !(T <: Function)
+    elseif T isa DataType && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing && !(T <: Function) && !(T <: AbstractArray) && !(T <: AbstractDict) && !(T <: AbstractSet) && !(T <: Tuple) && !(T <: IO) && T.name.module !== Base && T.name.module !== Core
         push!(ctx.struct_types, T)
     end
 end
@@ -812,6 +933,9 @@ function compile_intrinsic(ctx::JSCompilationContext, name::Symbol, args::Abstra
         return "($(compiled_args[2])) | 0"
     elseif name === :zext_int
         return "($(compiled_args[2])) >>> 0"
+    elseif name === :ult_int
+        # Unsigned less than — used in bounds checking
+        return "($(compiled_args[1]) >>> 0) < ($(compiled_args[2]) >>> 0)"
     else
         error("Unsupported intrinsic: $name")
     end
@@ -837,6 +961,8 @@ function compile_value(ctx::JSCompilationContext, val)
             return compile_invoke(ctx, stmt)
         elseif stmt isa Expr && stmt.head === :new
             return compile_new_expr(ctx, stmt)
+        elseif stmt isa Expr && stmt.head === :boundscheck
+            return "false"
         end
         # Fallback: create a local
         return get_local!(ctx, id)

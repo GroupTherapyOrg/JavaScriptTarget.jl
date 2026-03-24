@@ -493,4 +493,45 @@ process.stdout.write(a.toFixed(5));
 """
         @test run_js(js_code4) == "3.14159"
     end
+
+    @testset "CO-001: Vector indexing and length" begin
+        # getindex: 1-based → 0-based
+        f_vget(v::Vector{Int32}, i::Int32)::Int32 = v[i]
+        result = compile(f_vget, (Vector{Int32}, Int32); module_format=:none)
+        js = """
+$(result.js)
+process.stdout.write(String(f_vget([10, 20, 30], 2)));
+"""
+        @test run_js(js) == "20"
+
+        # First element
+        js2 = """
+$(result.js)
+process.stdout.write(String(f_vget([10, 20, 30], 1)));
+"""
+        @test run_js(js2) == "10"
+
+        # Last element
+        js3 = """
+$(result.js)
+process.stdout.write(String(f_vget([10, 20, 30], 3)));
+"""
+        @test run_js(js3) == "30"
+
+        # length
+        f_vlen(v::Vector{Int32}) = length(v)
+        result2 = compile(f_vlen, (Vector{Int32},); module_format=:none)
+        js4 = """
+$(result2.js)
+process.stdout.write(String(f_vlen([1, 2, 3, 4, 5])));
+"""
+        @test run_js(js4) == "5"
+
+        # Empty vector length
+        js5 = """
+$(result2.js)
+process.stdout.write(String(f_vlen([])));
+"""
+        @test run_js(js5) == "0"
+    end
 end
