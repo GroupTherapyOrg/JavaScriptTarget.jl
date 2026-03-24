@@ -210,6 +210,18 @@ function emit_structured!(ctx, buf, code, start_idx, end_idx, loop_headers, back
             continue
         end
 
+        # try/catch: EnterNode(catch_label) → try { ... } catch (_e) { ... }
+        if stmt isa Core.EnterNode
+            catch_label = stmt.catch_dest
+            print(buf, "$(indent)try {\n")
+            emit_structured!(ctx, buf, code, i + 1, catch_label - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+            print(buf, "$(indent)} catch (_e) {\n")
+            emit_structured!(ctx, buf, code, catch_label, end_idx, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+            print(buf, "$(indent)}\n")
+            i = end_idx + 1
+            continue
+        end
+
         if stmt isa Core.GotoIfNot
             cond = compile_value(ctx, stmt.cond)
             target = stmt.dest
@@ -465,6 +477,8 @@ function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
             name = ctx.js_locals[idx]
             print(buf, "$(indent)$(name) = undefined;\n")
         end
+    elseif expr.head === :leave || expr.head === :pop_exception
+        # Exception frame management: no-op in JS (try/catch handles this)
     end
 end
 
@@ -746,6 +760,16 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
 
     if func_name == "throw_complex_domainerror"
         return "(() => { throw new Error('DomainError') })()"
+    end
+
+    if func_name == "throw_boundserror"
+        return "(() => { throw new RangeError('BoundsError') })()"
+    end
+
+    # error(msg) → throw new Error(msg)
+    if func_name == "error"
+        msg_val = length(call_args) > 0 ? call_args[1] : "\"error\""
+        return "(() => { throw new Error($(msg_val)) })()"
     end
 
     # String operations: _string and print_to_string → template literal
@@ -1121,6 +1145,10 @@ function compile_intrinsic(ctx::JSCompilationContext, name::Symbol, args::Abstra
     elseif name === :ult_int
         # Unsigned less than — used in bounds checking
         return "($(compiled_args[1]) >>> 0) < ($(compiled_args[2]) >>> 0)"
+    elseif name === :checked_sdiv_int
+        return "($(compiled_args[1]) / $(compiled_args[2]) | 0)"
+    elseif name === :checked_srem_int
+        return "($(compiled_args[1]) % $(compiled_args[2]) | 0)"
     else
         error("Unsupported intrinsic: $name")
     end

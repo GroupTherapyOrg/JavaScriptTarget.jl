@@ -729,4 +729,43 @@ process.stdout.write(String(f_dict_delete("a", "b")));
 """
         @test run_js(js3) == "20"
     end
+
+    @testset "EX-001: try/catch" begin
+        # Normal path: no exception
+        function f_safe_div(a::Int32, b::Int32)::Int32
+            try
+                return div(a, b)
+            catch
+                return Int32(0)
+            end
+        end
+        result = compile(f_safe_div, (Int32, Int32); module_format=:none)
+        @test occursin("try {", result.js)
+        @test occursin("catch", result.js)
+        @test compile_and_run(f_safe_div, (Int32, Int32), Int32(10), Int32(3)) == "3"
+
+        # Exception path: error() throws into catch
+        function f_trycatch(x::Int32)::Int32
+            try
+                if x == Int32(0)
+                    error("zero!")
+                end
+                return x * Int32(2)
+            catch
+                return Int32(-1)
+            end
+        end
+        @test compile_and_run(f_trycatch, (Int32,), Int32(5)) == "10"
+        @test compile_and_run(f_trycatch, (Int32,), Int32(0)) == "-1"
+
+        # try/catch with computation in try body
+        function f_try_compute(a::Float64, b::Float64)::Float64
+            try
+                return a / b
+            catch
+                return 0.0
+            end
+        end
+        @test compile_and_run(f_try_compute, (Float64, Float64), 10.0, 4.0) == "2.5"
+    end
 end
