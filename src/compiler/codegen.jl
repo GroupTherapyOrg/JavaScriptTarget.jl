@@ -531,10 +531,23 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
     func_name = string(meth.name)
     call_args = [compile_value(ctx, a) for a in expr.args[3:end]]
 
-    # Check if the invoked function is a known intrinsic
-    if func_name == "sqrt_llvm" || func_name == "sqrt"
-        return "Math.sqrt($(call_args[1]))"
-    elseif func_name == "throw_complex_domainerror"
+    # Known function mappings
+    math_fns = Dict(
+        "sin" => "Math.sin", "cos" => "Math.cos", "tan" => "Math.tan",
+        "asin" => "Math.asin", "acos" => "Math.acos", "atan" => "Math.atan",
+        "exp" => "Math.exp", "log" => "Math.log", "log2" => "Math.log2", "log10" => "Math.log10",
+        "sqrt" => "Math.sqrt", "sqrt_llvm" => "Math.sqrt",
+        "abs" => "Math.abs", "min" => "Math.min", "max" => "Math.max",
+        "floor" => "Math.floor", "ceil" => "Math.ceil", "round" => "Math.round",
+        "trunc" => "Math.trunc", "sign" => "Math.sign",
+        "hypot" => "Math.hypot", "atan2" => "Math.atan2",
+    )
+    if haskey(math_fns, func_name)
+        js_fn = math_fns[func_name]
+        return "$(js_fn)($(join(call_args, ", ")))"
+    end
+
+    if func_name == "throw_complex_domainerror"
         return "(() => { throw new Error('DomainError') })()"
     end
 

@@ -324,4 +324,34 @@ process.stdout.write(String(double(7)));
 """
         @test run_js(js_code3) == "14"
     end
+
+    @testset "FN-003: Higher-order functions" begin
+        # apply_twice with sin (concrete callee)
+        function f_apply_twice(f, x::Float64)::Float64
+            return f(f(x))
+        end
+        result = compile(f_apply_twice, (typeof(sin), Float64); module_format=:none)
+        # Should produce Math.sin calls
+        @test occursin("Math.sin", result.js)
+
+        # Verify correct result: sin(sin(1.0))
+        expected = sin(sin(1.0))
+        js_code = """
+$(result.js)
+process.stdout.write(String(f_apply_twice(Math.sin, 1.0)));
+"""
+        @test parse(Float64, run_js(js_code)) ≈ expected atol=1e-10
+
+        # Math function: cos
+        f_cosine(x::Float64) = cos(x)
+        @test parse(Float64, compile_and_run(f_cosine, (Float64,), 0.0)) ≈ 1.0
+
+        # Math function: exp
+        f_exp(x::Float64) = exp(x)
+        @test parse(Float64, compile_and_run(f_exp, (Float64,), 0.0)) ≈ 1.0
+
+        # Math function: log
+        f_log(x::Float64) = log(x)
+        @test parse(Float64, compile_and_run(f_log, (Float64,), 1.0)) ≈ 0.0
+    end
 end
