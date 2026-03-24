@@ -27,6 +27,7 @@ mutable struct JSCompilationContext
     type_ids::Dict{DataType, Int}        # Concrete type → DFS pre-order type ID
     abstract_ranges::Dict{Type, Tuple{Int,Int}}  # Abstract type → (lo, hi) range
     type_id_counter::Int
+    required_runtime::Set{Symbol}        # Runtime helpers needed by compiled code
 end
 
 function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return_type::Type, func_name::String)
@@ -59,6 +60,7 @@ function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return
         Dict{DataType, Int}(),
         Dict{Type, Tuple{Int,Int}}(),
         0,
+        Set{Symbol}(),
     )
 end
 

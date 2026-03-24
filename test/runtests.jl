@@ -768,4 +768,136 @@ process.stdout.write(String(f_dict_delete("a", "b")));
         end
         @test compile_and_run(f_try_compute, (Float64, Float64), 10.0, 4.0) == "2.5"
     end
+
+    @testset "RT-001: Runtime library" begin
+        # --- IO: println → console.log ---
+        @testset "println / print" begin
+            # println with single arg
+            function f_println_int(x::Int32)::Nothing
+                println(x)
+                return nothing
+            end
+            result = compile(f_println_int, (Int32,); module_format=:none)
+            @test occursin("jl_println", result.js)
+            @test occursin("// JavaScriptTarget.jl runtime", result.js)
+            # Verify runtime is included (tree-shaken)
+            @test occursin("function jl_println", result.js)
+
+            # println with string
+            function f_println_str(s::String)::Nothing
+                println(s)
+                return nothing
+            end
+            result2 = compile(f_println_str, (String,); module_format=:none)
+            @test occursin("jl_println", result2.js)
+        end
+
+        # --- String operations ---
+        @testset "String operations" begin
+            # startswith
+            f_starts(s::String, p::String) = startswith(s, p)
+            result3 = compile(f_starts, (String, String); module_format=:none)
+            js3 = """
+$(result3.js)
+process.stdout.write(String(f_starts("hello world", "hello")));
+"""
+            @test run_js(js3) == "true"
+            js3b = """
+$(result3.js)
+process.stdout.write(String(f_starts("hello world", "xyz")));
+"""
+            @test run_js(js3b) == "false"
+
+            # endswith
+            f_ends(s::String, p::String) = endswith(s, p)
+            result4 = compile(f_ends, (String, String); module_format=:none)
+            js4 = """
+$(result4.js)
+process.stdout.write(String(f_ends("hello world", "world")));
+"""
+            @test run_js(js4) == "true"
+
+            # String repeat (already in CT-002, but verify it still works)
+            f_rep2(s::String, n::Int32) = s ^ n
+            @test compile_and_run(f_rep2, (String, Int32), "ab", Int32(3)) == "ababab"
+        end
+
+        # --- Math: div, fld, mod, cld, rem ---
+        # Julia inlines these to intrinsics — no runtime helper needed
+        @testset "Math: div, fld, mod, cld" begin
+            # div (truncating)
+            f_div(a::Int32, b::Int32) = div(a, b)
+            @test compile_and_run(f_div, (Int32, Int32), Int32(7), Int32(2)) == "3"
+            @test compile_and_run(f_div, (Int32, Int32), Int32(-7), Int32(2)) == "-3"
+
+            # fld (floor division)
+            f_fld(a::Int32, b::Int32) = fld(a, b)
+            @test compile_and_run(f_fld, (Int32, Int32), Int32(7), Int32(2)) == "3"
+            @test compile_and_run(f_fld, (Int32, Int32), Int32(-7), Int32(2)) == "-4"
+
+            # mod (modulus, same sign as divisor)
+            f_mod(a::Int32, b::Int32) = mod(a, b)
+            @test compile_and_run(f_mod, (Int32, Int32), Int32(7), Int32(3)) == "1"
+            @test compile_and_run(f_mod, (Int32, Int32), Int32(-7), Int32(3)) == "2"
+
+            # cld (ceiling division)
+            f_cld(a::Int32, b::Int32) = cld(a, b)
+            @test compile_and_run(f_cld, (Int32, Int32), Int32(7), Int32(2)) == "4"
+            @test compile_and_run(f_cld, (Int32, Int32), Int32(6), Int32(2)) == "3"
+        end
+
+        # --- Tree-shaking: no runtime when not needed ---
+        @testset "Tree-shaking" begin
+            # Simple arithmetic should NOT include runtime
+            f_simple(x::Int32) = x + Int32(1)
+            result = compile(f_simple, (Int32,); module_format=:none)
+            @test !occursin("// JavaScriptTarget.jl runtime", result.js)
+
+            # println SHOULD include runtime
+            function f_println_tree(x::Int32)::Nothing
+                println(x)
+                return nothing
+            end
+            result2 = compile(f_println_tree, (Int32,); module_format=:none)
+            @test occursin("function jl_println", result2.js)
+            # but NOT unneeded helpers
+            @test !occursin("function jl_div", result2.js)
+            @test !occursin("function jl_fld", result2.js)
+        end
+
+        # --- Error types ---
+        @testset "Error types in runtime" begin
+            # error() should work (already tested in EX-001)
+            # Test that thrown errors are catchable
+            function f_catch_error(x::Int32)::String
+                try
+                    if x == Int32(0)
+                        error("bad value")
+                    end
+                    return "ok"
+                catch
+                    return "caught"
+                end
+            end
+            @test compile_and_run(f_catch_error, (Int32,), Int32(1)) == "ok"
+            @test compile_and_run(f_catch_error, (Int32,), Int32(0)) == "caught"
+        end
+
+        # --- isempty (uses Core.sizeof → .length) ---
+        @testset "isempty" begin
+            f_isempty(s::String) = isempty(s)
+            result = compile(f_isempty, (String,); module_format=:none)
+            @test occursin(".length", result.js)
+            js1 = """
+$(result.js)
+process.stdout.write(String(f_isempty("")));
+"""
+            @test run_js(js1) == "true"
+            js2 = """
+$(result.js)
+process.stdout.write(String(f_isempty("hello")));
+"""
+            @test run_js(js2) == "false"
+        end
+    end
 end

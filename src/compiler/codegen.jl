@@ -501,6 +501,23 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         end
     end
 
+    # Handle specific Core.Builtin functions that aren't covered by later checks
+    # (===, isa, ifelse, getfield, setfield! etc. are handled below)
+    if callee isa Core.Builtin
+        raw_name = string(nameof(typeof(callee)))
+        bname = startswith(raw_name, "#") ? raw_name[2:end] : raw_name
+        if bname == "sizeof"
+            arg_val = compile_value(ctx, args[2])
+            return "$(arg_val).length"
+        elseif bname == "nfields"
+            arg_val = compile_value(ctx, args[2])
+            return "Object.keys($(arg_val)).length"
+        elseif bname == "fieldtype" || bname == "apply_type"
+            return "undefined"
+        end
+        # Other builtins (===, isa, getfield, etc.) fall through to handlers below
+    end
+
     # Check for known builtins
     if callee isa GlobalRef
         bname = callee.name
@@ -814,6 +831,150 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
                 return "($(d_val).has($(key_val)) ? $(d_val).get($(key_val)) : $(def_val))"
             end
         end
+
+        # Set operations
+        if first_arg_type isa DataType && first_arg_type <: AbstractSet
+            if func_name == "push!"
+                s_val = compile_value(ctx, expr.args[3])
+                val_val = compile_value(ctx, expr.args[4])
+                return "$(s_val).add($(val_val))"
+            elseif func_name == "delete!"
+                s_val = compile_value(ctx, expr.args[3])
+                val_val = compile_value(ctx, expr.args[4])
+                return "$(s_val).delete($(val_val))"
+            elseif func_name == "in" || func_name == "∈"
+                val_val = compile_value(ctx, expr.args[3])
+                s_val = compile_value(ctx, expr.args[4])
+                return "$(s_val).has($(val_val))"
+            end
+        end
+
+        # Vector operations
+        if first_arg_type isa DataType && first_arg_type <: AbstractArray
+            if func_name == "push!" || func_name == "_push!"
+                arr_val = compile_value(ctx, expr.args[3])
+                val_val = compile_value(ctx, expr.args[4])
+                return "$(arr_val).push($(val_val))"
+            elseif func_name == "pop!"
+                arr_val = compile_value(ctx, expr.args[3])
+                return "$(arr_val).pop()"
+            elseif func_name == "append!" || func_name == "_append!"
+                arr_val = compile_value(ctx, expr.args[3])
+                other_val = compile_value(ctx, expr.args[4])
+                return "$(arr_val).push(...$(other_val))"
+            elseif func_name == "empty!"
+                arr_val = compile_value(ctx, expr.args[3])
+                return "($(arr_val).length = 0, $(arr_val))"
+            end
+        end
+
+        # String operations (first arg is String)
+        if first_arg_type === String || (first_arg_type isa DataType && first_arg_type <: AbstractString)
+            if func_name == "occursin" || func_name == "contains"
+                # occursin(needle, haystack) — note arg order: pattern first, string second
+                needle = compile_value(ctx, expr.args[3])
+                haystack = compile_value(ctx, expr.args[4])
+                return "$(haystack).includes($(needle))"
+            elseif func_name == "startswith"
+                s_val = compile_value(ctx, expr.args[3])
+                prefix = compile_value(ctx, expr.args[4])
+                return "$(s_val).startsWith($(prefix))"
+            elseif func_name == "endswith"
+                s_val = compile_value(ctx, expr.args[3])
+                suffix = compile_value(ctx, expr.args[4])
+                return "$(s_val).endsWith($(suffix))"
+            elseif func_name == "uppercase"
+                s_val = compile_value(ctx, expr.args[3])
+                return "$(s_val).toUpperCase()"
+            elseif func_name == "lowercase"
+                s_val = compile_value(ctx, expr.args[3])
+                return "$(s_val).toLowerCase()"
+            elseif func_name == "strip"
+                s_val = compile_value(ctx, expr.args[3])
+                return "$(s_val).trim()"
+            elseif func_name == "lstrip"
+                s_val = compile_value(ctx, expr.args[3])
+                return "$(s_val).trimStart()"
+            elseif func_name == "rstrip"
+                s_val = compile_value(ctx, expr.args[3])
+                return "$(s_val).trimEnd()"
+            elseif func_name == "split"
+                s_val = compile_value(ctx, expr.args[3])
+                if length(expr.args) >= 4
+                    delim = compile_value(ctx, expr.args[4])
+                    return "$(s_val).split($(delim))"
+                else
+                    return "$(s_val).split(\"\")"
+                end
+            elseif func_name == "replace"
+                s_val = compile_value(ctx, expr.args[3])
+                # replace(s, pair) — pair is a Pair, but in IR it may be separate args
+                if length(expr.args) >= 5
+                    pattern = compile_value(ctx, expr.args[4])
+                    replacement = compile_value(ctx, expr.args[5])
+                    return "$(s_val).replaceAll($(pattern), $(replacement))"
+                end
+            elseif func_name == "join"
+                # join(arr, sep) — arr is first arg for join
+                arr_val = compile_value(ctx, expr.args[3])
+                if length(expr.args) >= 4
+                    sep = compile_value(ctx, expr.args[4])
+                    return "$(arr_val).join($(sep))"
+                else
+                    return "$(arr_val).join(\"\")"
+                end
+            elseif func_name == "chop"
+                s_val = compile_value(ctx, expr.args[3])
+                return "$(s_val).slice(0, -1)"
+            elseif func_name == "chomp"
+                s_val = compile_value(ctx, expr.args[3])
+                return "$(s_val).replace(/\\n\$/, \"\")"
+            elseif func_name == "reverse"
+                s_val = compile_value(ctx, expr.args[3])
+                return "[...$(s_val)].reverse().join(\"\")"
+            end
+        end
+    end
+
+    # IO: println → console.log, print → jl_print
+    if func_name == "println"
+        require_runtime!(ctx, :jl_println)
+        return "jl_println($(join(call_args, ", ")))"
+    end
+    if func_name == "print"
+        require_runtime!(ctx, :jl_print)
+        return "jl_print($(join(call_args, ", ")))"
+    end
+
+    # Math: div, fld, mod, cld, rem
+    if func_name == "div" && length(call_args) >= 2
+        require_runtime!(ctx, :jl_div)
+        return "jl_div($(call_args[1]), $(call_args[2]))"
+    end
+    if func_name == "fld" && length(call_args) >= 2
+        require_runtime!(ctx, :jl_fld)
+        return "jl_fld($(call_args[1]), $(call_args[2]))"
+    end
+    if func_name == "mod" && length(call_args) >= 2
+        require_runtime!(ctx, :jl_mod)
+        return "jl_mod($(call_args[1]), $(call_args[2]))"
+    end
+    if func_name == "cld" && length(call_args) >= 2
+        require_runtime!(ctx, :jl_cld)
+        return "jl_cld($(call_args[1]), $(call_args[2]))"
+    end
+    if func_name == "rem" && length(call_args) >= 2
+        return "($(call_args[1]) % $(call_args[2])) | 0"
+    end
+
+    # isempty(collection) → collection.length === 0
+    if func_name == "isempty" && length(call_args) >= 1
+        return "$(call_args[1]).length === 0"
+    end
+
+    # convert(T, x) → just x (type conversions are compile-time in JS)
+    if func_name == "convert" && length(call_args) >= 2
+        return call_args[2]
     end
 
     return "$(func_name)($(join(call_args, ", ")))"
@@ -1212,10 +1373,17 @@ function compile_value(ctx::JSCompilationContext, val)
         return repr(string(val))
     elseif val isa Type
         return string(val)
+    elseif val isa Core.Builtin || val isa Core.IntrinsicFunction
+        # Core builtins/intrinsics as values — emit their name
+        return string(nameof(typeof(val)))
     elseif val isa Function
         # Singleton closure (no captures)
         T = typeof(val)
         if T <: Function && Base.issingletontype(T)
+            # Skip Core builtins that masquerade as singleton functions
+            if T.name.module === Core
+                return "/* core function */ undefined"
+            end
             return compile_closure_creation(ctx, T, Any[])
         end
         return "/* unsupported function: $(typeof(val)) */ undefined"
@@ -1260,6 +1428,12 @@ function compile(f, arg_types::Tuple;
         js_body = struct_defs * "\n" * js_body
     end
 
+    # Prepend runtime helpers if any were required
+    runtime_code = get_runtime_code(ctx.required_runtime)
+    if !isempty(runtime_code)
+        js_body = runtime_code * "\n" * js_body
+    end
+
     js = if module_format === :esm
         "export " * js_body
     elseif module_format === :cjs
@@ -1297,6 +1471,7 @@ function compile_module(functions::Vector;
     export_names = String[]
     all_struct_types = Set{DataType}()
     all_type_ids = Dict{DataType, Int}()
+    all_required_runtime = Set{Symbol}()
 
     for entry in functions
         f, arg_types, name = entry
@@ -1306,6 +1481,7 @@ function compile_module(functions::Vector;
         js_body = compile_function(ctx)
         union!(all_struct_types, ctx.struct_types)
         merge!(all_type_ids, ctx.type_ids)
+        union!(all_required_runtime, ctx.required_runtime)
         print(buf, js_body)
         print(buf, "\n")
         push!(export_names, name)
@@ -1328,6 +1504,13 @@ function compile_module(functions::Vector;
         struct_defs = join([generate_struct_class(T; type_id=get(all_type_ids, T, nothing)) for T in all_struct_types], "\n")
         js_body_str = struct_defs * "\n" * js_body_str
     end
+
+    # Prepend runtime helpers
+    runtime_code = get_runtime_code(all_required_runtime)
+    if !isempty(runtime_code)
+        js_body_str = runtime_code * "\n" * js_body_str
+    end
+
     js = js_body_str
     dts_str = String(take!(dts_buf))
     return JSOutput(js, dts_str, "", export_names, sizeof(js))
