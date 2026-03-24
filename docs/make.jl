@@ -24,7 +24,5 @@ makedocs(;
     ),
 )
 
-deploydocs(;
-    repo="github.com/GroupTherapyOrg/JavaScriptTarget.jl.git",
-    devbranch="main",
-)
+# Deployment handled by GitHub Actions (actions/deploy-pages)
+# No deploydocs() needed — workflow uploads docs/build/ directly
