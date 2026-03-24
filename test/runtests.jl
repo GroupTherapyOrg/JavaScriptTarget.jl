@@ -576,4 +576,59 @@ process.stdout.write(r[0] + "," + r[1]);
 """
         @test run_js(js4) == "2,1"
     end
+
+    @testset "ST-004: Abstract type hierarchies" begin
+        abstract type TestAnimal end
+        struct TestDog <: TestAnimal
+            name::String
+        end
+        struct TestCat <: TestAnimal
+            name::String
+        end
+
+        # isa check with abstract type argument — concrete subtype check
+        function check_is_dog(a::TestAnimal)::Bool
+            return isa(a, TestDog)
+        end
+        result = compile(check_is_dog, (TestAnimal,); module_format=:none)
+        @test occursin("instanceof", result.js)
+        js1 = """
+$(result.js)
+process.stdout.write(String(check_is_dog(new TestDog("Rex"))));
+"""
+        @test run_js(js1) == "true"
+        js2 = """
+$(result.js)
+process.stdout.write(String(check_is_dog(new TestCat("Whiskers"))));
+"""
+        @test run_js(js2) == "false"
+
+        # Dispatch on abstract type subtypes with field access
+        function animal_speak(a::TestAnimal)::String
+            if isa(a, TestDog)
+                return "woof"
+            else
+                return "meow"
+            end
+        end
+        result2 = compile(animal_speak, (TestAnimal,); module_format=:none)
+        js3 = """
+$(result2.js)
+process.stdout.write(animal_speak(new TestDog("Rex")));
+"""
+        @test run_js(js3) == "woof"
+        js4 = """
+$(result2.js)
+process.stdout.write(animal_speak(new TestCat("Whiskers")));
+"""
+        @test run_js(js4) == "meow"
+
+        # $type is set on struct prototypes when abstract types are in arg_types
+        result3 = compile(check_is_dog, (TestAnimal,); module_format=:none)
+        @test occursin("prototype.\$type", result3.js)
+
+        # Both concrete subtypes get classes even if only one is checked
+        @test occursin("class TestDog", result3.js)
+        @test occursin("class TestCat", result3.js)
+    end
 end

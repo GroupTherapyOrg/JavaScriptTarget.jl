@@ -24,6 +24,9 @@ mutable struct JSCompilationContext
     indent::Int
     captured_vars::Dict{Symbol, String}  # For closures: field_name → JS expression
     struct_types::Set{DataType}          # Struct types that need class definitions
+    type_ids::Dict{DataType, Int}        # Concrete type → DFS pre-order type ID
+    abstract_ranges::Dict{Type, Tuple{Int,Int}}  # Abstract type → (lo, hi) range
+    type_id_counter::Int
 end
 
 function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return_type::Type, func_name::String)
@@ -53,6 +56,9 @@ function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return
         1,
         Dict{Symbol, String}(),
         Set{DataType}(),
+        Dict{DataType, Int}(),
+        Dict{Type, Tuple{Int,Int}}(),
+        0,
     )
 end
 

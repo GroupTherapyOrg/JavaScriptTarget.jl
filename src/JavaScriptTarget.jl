@@ -1,5 +1,7 @@
 module JavaScriptTarget
 
+using InteractiveUtils: subtypes
+
 # === Public API ===
 export compile, compile_module
 export JSOutput

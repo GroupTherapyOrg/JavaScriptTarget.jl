@@ -482,8 +482,24 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             return "typeof $(x_val) === \"string\""
         elseif T === Bool
             return "typeof $(x_val) === \"boolean\""
+        elseif T isa DataType && isabstracttype(T) && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing
+            # Abstract type: DFS pre-order type ID range check
+            assign_type_ids!(ctx, T)
+            if haskey(ctx.abstract_ranges, T)
+                lo, hi = ctx.abstract_ranges[T]
+                # Register all concrete subtypes for class generation
+                for cst in concrete_subtypes(T)
+                    push!(ctx.struct_types, cst)
+                end
+                if lo == hi
+                    return "$(x_val).\$type === $(lo)"
+                else
+                    return "$(x_val).\$type >= $(lo) && $(x_val).\$type <= $(hi)"
+                end
+            end
+            return "false"
         elseif T isa DataType && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing
-            # Struct type: use instanceof
+            # Concrete struct type: use instanceof
             type_name = string(nameof(T))
             push!(ctx.struct_types, T)
             return "$(x_val) instanceof $(type_name)"
@@ -808,15 +824,62 @@ function register_struct_types!(ctx::JSCompilationContext, T)
     if T isa Union
         register_struct_types!(ctx, T.a)
         register_struct_types!(ctx, T.b)
-    elseif T isa DataType && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing && !(T <: Function) && !(T <: AbstractArray) && !(T <: AbstractDict) && !(T <: AbstractSet) && !(T <: Tuple) && !(T <: IO) && T.name.module !== Base && T.name.module !== Core
+    elseif T isa DataType && !isabstracttype(T) && !(T <: Number) && !(T <: AbstractString) && T !== Bool && T !== Nothing && !(T <: Function) && !(T <: AbstractArray) && !(T <: AbstractDict) && !(T <: AbstractSet) && !(T <: Tuple) && !(T <: IO) && T.name.module !== Base && T.name.module !== Core
         push!(ctx.struct_types, T)
     end
 end
 
 """
+Find all concrete (leaf) subtypes of a type via recursive DFS.
+"""
+function concrete_subtypes(T::Type)
+    if Base.isconcretetype(T)
+        return DataType[T]
+    end
+    result = DataType[]
+    for S in subtypes(T)
+        append!(result, concrete_subtypes(S))
+    end
+    return result
+end
+
+"""
+Assign DFS pre-order type IDs to all concrete subtypes of an abstract type.
+Updates ctx.type_ids and ctx.abstract_ranges.
+"""
+function assign_type_ids!(ctx::JSCompilationContext, abstract_type::Type)
+    haskey(ctx.abstract_ranges, abstract_type) && return
+
+    function dfs!(T::Type)
+        if Base.isconcretetype(T)
+            if !haskey(ctx.type_ids, T)
+                ctx.type_id_counter += 1
+                ctx.type_ids[T] = ctx.type_id_counter
+            end
+            id = ctx.type_ids[T]
+            return (id, id)
+        else
+            lo = typemax(Int)
+            hi = 0
+            for S in subtypes(T)
+                (s_lo, s_hi) = dfs!(S)
+                lo = min(lo, s_lo)
+                hi = max(hi, s_hi)
+            end
+            if lo <= hi
+                ctx.abstract_ranges[T] = (lo, hi)
+            end
+            return (lo, hi)
+        end
+    end
+
+    dfs!(abstract_type)
+end
+
+"""
 Generate ES6 class definition for a Julia struct type.
 """
-function generate_struct_class(T::DataType)
+function generate_struct_class(T::DataType; type_id::Union{Int,Nothing}=nothing)
     name = string(nameof(T))
     fnames = fieldnames(T)
     buf = IOBuffer()
@@ -829,6 +892,9 @@ function generate_struct_class(T::DataType)
     end
     print(buf, "  }\n")
     print(buf, "}\n")
+    if type_id !== nothing
+        print(buf, "$(name).prototype.\$type = $(type_id);\n")
+    end
     return String(take!(buf))
 end
 
@@ -1036,12 +1102,19 @@ function compile(f, arg_types::Tuple;
     # Register struct types from function arguments (including Union members)
     for T in arg_types
         register_struct_types!(ctx, T)
+        # For abstract type arguments, register all concrete subtypes and assign type IDs
+        if T isa DataType && isabstracttype(T)
+            for S in concrete_subtypes(T)
+                register_struct_types!(ctx, S)
+            end
+            assign_type_ids!(ctx, T)
+        end
     end
 
     js_body = compile_function(ctx)
 
     # Prepend struct class definitions if any
-    struct_defs = join([generate_struct_class(T) for T in ctx.struct_types], "\n")
+    struct_defs = join([generate_struct_class(T; type_id=get(ctx.type_ids, T, nothing)) for T in ctx.struct_types], "\n")
     if !isempty(struct_defs)
         js_body = struct_defs * "\n" * js_body
     end
@@ -1082,6 +1155,7 @@ function compile_module(functions::Vector;
     dts_buf = IOBuffer()
     export_names = String[]
     all_struct_types = Set{DataType}()
+    all_type_ids = Dict{DataType, Int}()
 
     for entry in functions
         f, arg_types, name = entry
@@ -1090,6 +1164,7 @@ function compile_module(functions::Vector;
         ctx = JSCompilationContext(code_info, arg_tuple, return_type, name)
         js_body = compile_function(ctx)
         union!(all_struct_types, ctx.struct_types)
+        merge!(all_type_ids, ctx.type_ids)
         print(buf, js_body)
         print(buf, "\n")
         push!(export_names, name)
@@ -1109,7 +1184,7 @@ function compile_module(functions::Vector;
     # Prepend struct class definitions
     js_body_str = String(take!(buf))
     if !isempty(all_struct_types)
-        struct_defs = join([generate_struct_class(T) for T in all_struct_types], "\n")
+        struct_defs = join([generate_struct_class(T; type_id=get(all_type_ids, T, nothing)) for T in all_struct_types], "\n")
         js_body_str = struct_defs * "\n" * js_body_str
     end
     js = js_body_str
