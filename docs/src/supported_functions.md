@@ -1,9 +1,8 @@
-# Supported Julia Functions in JavaScriptTarget.jl
+# Supported Functions
 
-## Status Legend
-- **Supported**: Compiles and runs correctly in Node.js
-- **Partial**: Compiles but with limitations
-- **Excluded**: Cannot be compiled (depends on C runtime, FFI, etc.)
+This page lists every Base function's compilation status: **Supported** (compiles and runs correctly), **Partial** (compiles with limitations), or **Excluded** (cannot be compiled).
+
+Each supported function includes a runnable example you can paste into the [Playground](index.md).
 
 ---
 
@@ -18,12 +17,23 @@
 | `-` (Float64) | Supported | `a - b` | |
 | `*` (Float64) | Supported | `a * b` | |
 | `/` (Float64) | Supported | `a / b` | |
-| `-` (unary, Float64) | Supported | `-a` | |
+| `-` (unary) | Supported | `-a` | |
 | `div(a, b)` | Supported | `(a / b) \| 0` | Julia inlines to intrinsic |
 | `fld(a, b)` | Supported | Inlined arithmetic | Floor division |
 | `mod(a, b)` | Supported | Inlined arithmetic | Same sign as divisor |
 | `cld(a, b)` | Supported | Inlined arithmetic | Ceiling division |
 | `rem(a, b)` | Supported | `a % b` | |
+
+**Example:**
+```julia
+function arithmetic_demo(a, b)
+    println(a + b)
+    println(a * b)
+    println(a / b)
+    println(a ^ 2)
+end
+arithmetic_demo(3, 4)
+```
 
 ## Math Functions
 
@@ -51,6 +61,18 @@
 | `max(a, b)` | Supported | `Math.max(a, b)` | |
 | `hypot(a, b)` | Supported | `Math.hypot(a, b)` | |
 
+**Example:**
+```julia
+function math_demo(x)
+    println(sin(x))
+    println(sqrt(x))
+    println(floor(x))
+    println(abs(-x))
+    println(min(x, 10.0))
+end
+math_demo(3.14)
+```
+
 ## Comparisons
 
 | Function | Status | JS Output | Notes |
@@ -63,6 +85,14 @@
 | `>=` | Supported | `>=` | |
 | `===` | Supported | `===` (primitives), `jl_egal` (immutable structs) | |
 
+**Example:**
+```julia
+println(3 > 2)
+println(3 == 3)
+println(3 != 4)
+println(5 <= 5)
+```
+
 ## Boolean
 
 | Function | Status | JS Output | Notes |
@@ -72,6 +102,21 @@
 | `\|\|` | Supported | Short-circuit pattern | |
 | `&` (bitwise on Bool) | Partial | `a & b` | Returns number in JS, not boolean |
 | `\|` (bitwise on Bool) | Partial | `a \| b` | Returns number in JS, not boolean |
+
+**Example:**
+```julia
+println(!false)
+println(true)
+function check(x)
+    if x > 0
+        return true
+    else
+        return false
+    end
+end
+println(check(5))
+println(check(-3))
+```
 
 ## Bitwise (Int32)
 
@@ -113,6 +158,26 @@
 | `replace(s, p=>r)` | Excluded | — | Julia inlines deeply |
 | `length(s)` | Partial | — | Julia's codepoint length differs from JS |
 
+**Example (compiler):**
+```julia
+import JavaScriptTarget as JST
+
+greet(name::String) = "Hello " * name * "!"
+result = JST.compile(greet, (String,))
+println(result.js)
+```
+
+**Example (playground):**
+```julia
+println(string("Hello", " ", "World"))
+println(uppercase("abc"))
+println(startswith("foobar", "foo"))
+println(length("test"))
+```
+
+!!! note "Playground vs Compiler"
+    The playground's codegen handles `uppercase`, `lowercase`, `strip`, `split`, and `replace` as named function calls mapped to JS builtins. These work in the playground but not via `compile()` where Julia inlines them.
+
 ## Collections
 
 | Function | Status | JS Output | Notes |
@@ -131,6 +196,14 @@
 | `(a, b)` (Tuple) | Supported | `[a, b]` | |
 | `t[1]` (Tuple) | Supported | `t[0]` | |
 
+**Example:**
+```julia
+a = [10, 20, 30, 40, 50]
+println(a[1])
+println(a[3])
+println(length(a))
+```
+
 ## Control Flow
 
 | Function | Status | JS Output | Notes |
@@ -143,6 +216,28 @@
 | `try/catch` | Supported | `try/catch` | |
 | `error(msg)` | Supported | `throw new Error(msg)` | |
 
+**Example:**
+```julia
+function fizzbuzz(n)
+    for i in 1:n
+        if i > 15 * (i / 15 |> floor)
+            if i > 3 * (i / 3 |> floor)
+                if i > 5 * (i / 5 |> floor)
+                    println(i)
+                else
+                    println("Buzz")
+                end
+            else
+                println("Fizz")
+            end
+        else
+            println("FizzBuzz")
+        end
+    end
+end
+fizzbuzz(15)
+```
+
 ## Structs
 
 | Function | Status | JS Output | Notes |
@@ -154,6 +249,23 @@
 | Parametric types | Supported | Type erasure | `Box{Int32}` → `Box` |
 | Abstract type hierarchies | Supported | DFS pre-order type IDs | |
 
+**Example:**
+```julia
+struct Point
+    x
+    y
+end
+
+function distance(p)
+    return sqrt(p.x * p.x + p.y * p.y)
+end
+
+p = Point(3.0, 4.0)
+println(p.x)
+println(p.y)
+println(distance(p))
+```
+
 ## Functions
 
 | Function | Status | JS Output | Notes |
@@ -161,6 +273,24 @@
 | Multi-function modules | Supported | ESM/CJS/IIFE | |
 | Closures | Supported | JS function expressions | |
 | Higher-order (concrete callee) | Supported | Direct call | |
+| Pipe operator (`\|>`) | Supported | `f(x)` | |
+
+**Example:**
+```julia
+function square(x)
+    return x * x
+end
+
+function sum_of_squares(n)
+    s = 0
+    for i in 1:n
+        s = s + square(i)
+    end
+    return s
+end
+
+println(sum_of_squares(10))
+```
 
 ## IO
 
@@ -171,8 +301,8 @@
 
 ## Known Limitations
 
-1. **Cross-referencing phi nodes in loops**: Functions with patterns like `a, b = b, a+b` (fibonacci) produce incorrect results due to sequential phi assignment. Needs temp variables.
-2. **Deeply inlined Base functions**: `push!`, `pop!`, `haskey`, `uppercase`, `lowercase`, `strip`, `occursin`, `split`, `replace` get inlined by Julia into internal operations that can't be mapped to JS. These need either runtime wrappers or `optimize=false` mode.
-3. **Bool bitwise ops**: `&` and `|` on Bool produce numbers (0/1) in JS, not booleans.
-4. **Int32 abs**: Uses `flipsign_int` intrinsic not yet mapped.
-5. **String length**: Julia counts codepoints, JS `.length` counts UTF-16 code units.
+1. **Deeply inlined Base functions**: `push!`, `pop!`, `haskey`, `uppercase`, `lowercase`, `strip`, `occursin`, `split`, `replace` get inlined by Julia into internal operations that can't be mapped to JS via `compile()`. The playground handles these as named functions.
+2. **Bool bitwise ops**: `&` and `|` on Bool produce numbers (0/1) in JS, not booleans.
+3. **Int32 abs**: Uses `flipsign_int` intrinsic not yet mapped.
+4. **String length**: Julia counts codepoints, JS `.length` counts UTF-16 code units.
+5. **Nested try/catch**: Single-level try/catch works; nested try/catch may not work correctly in the playground.
