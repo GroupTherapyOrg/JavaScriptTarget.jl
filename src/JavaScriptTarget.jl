@@ -18,4 +18,7 @@ include("compiler/codegen.jl")
 # === Runtime ===
 include("compiler/runtime.jl")
 
+# === Source Maps ===
+include("compiler/sourcemap.jl")
+
 end # module JavaScriptTarget

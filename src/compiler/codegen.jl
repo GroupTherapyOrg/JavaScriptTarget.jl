@@ -1460,7 +1460,16 @@ function compile(f, arg_types::Tuple;
         dts_str = String(take!(dts_buf))
     end
 
-    return JSOutput(js, dts_str, "", [name], sizeof(js))
+    # Generate source map if requested
+    sm_str = ""
+    if sourcemap
+        source_file, source_line = get_source_location(f, arg_types)
+        if source_file != "unknown"
+            sm_str = generate_sourcemap(source_file, source_line, js, name)
+        end
+    end
+
+    return JSOutput(js, dts_str, sm_str, [name], sizeof(js))
 end
 
 """

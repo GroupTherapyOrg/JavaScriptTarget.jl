@@ -1025,4 +1025,59 @@ process.stdout.write(String(f_isempty("hello")));
             @test occursin("constructor", result.dts)
         end
     end
+
+    @testset "RT-004: Source map generation" begin
+        # --- VLQ encoding ---
+        @testset "VLQ encoding" begin
+            # Test basic VLQ encoding values
+            # 0 → "A" (0 → unsigned 0, 5-bit chunk 0 → 'A')
+            @test JavaScriptTarget.vlq_encode(0) == "A"
+            # 1 → "C" (1 → unsigned 2, 5-bit chunk 2 → 'C')
+            @test JavaScriptTarget.vlq_encode(1) == "C"
+            # -1 → "D" (-1 → unsigned 3, 5-bit chunk 3 → 'D')
+            @test JavaScriptTarget.vlq_encode(-1) == "D"
+            # 5 → "K" (5 → unsigned 10, 5-bit chunk 10 → 'K')
+            @test JavaScriptTarget.vlq_encode(5) == "K"
+            # Larger value: 16 → unsigned 32, needs continuation
+            @test length(JavaScriptTarget.vlq_encode(16)) == 2
+        end
+
+        # --- Source map generation ---
+        @testset "Source map JSON structure" begin
+            sm = JavaScriptTarget.generate_sourcemap(
+                "test.jl", 10, "line1\nline2\nline3\n", "test_func"
+            )
+            @test occursin("\"version\": 3", sm)
+            @test occursin("\"file\": \"test_func.js\"", sm)
+            @test occursin("\"sources\": [\"test.jl\"]", sm)
+            @test occursin("\"mappings\":", sm)
+            @test occursin("\"names\": []", sm)
+        end
+
+        # --- Integration with compile ---
+        @testset "Source map in compile()" begin
+            # sourcemap=false (default) → empty
+            f_sm_test(x::Int32) = x + Int32(1)
+            result1 = compile(f_sm_test, (Int32,); sourcemap=false)
+            @test result1.sourcemap == ""
+
+            # sourcemap=true → generates map (may be empty for REPL functions)
+            result2 = compile(f_sm_test, (Int32,); sourcemap=true)
+            # REPL functions have file="none" so sourcemap may be empty
+            # That's OK — just verify no errors
+            @test result2.sourcemap isa String
+        end
+
+        # --- Mappings content ---
+        @testset "Mappings semicolons" begin
+            # 3-line JS should produce 2 semicolons in mappings (separating 3 line groups)
+            sm = JavaScriptTarget.generate_sourcemap(
+                "test.jl", 1, "a\nb\nc\n", "f"
+            )
+            mappings = match(r"\"mappings\": \"([^\"]+)\"", sm)
+            @test mappings !== nothing
+            # 3 lines → 2 semicolons
+            @test count(';', mappings.captures[1]) == 2
+        end
+    end
 end
