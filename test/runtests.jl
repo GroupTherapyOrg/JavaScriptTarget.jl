@@ -251,4 +251,39 @@ include("utils.jl")
         f_ret_nothing()::Nothing = nothing
         @test compile_and_run(f_ret_nothing, ()) == "null"
     end
+
+    @testset "FN-001: compile_module() multi-function" begin
+        # Cross-function call
+        @noinline f_helper(x::Int32)::Int32 = x + Int32(10)
+        f_main(x::Int32)::Int32 = f_helper(x) * Int32(2)
+
+        @test compile_module_and_run([
+            (f_helper, (Int32,), "f_helper"),
+            (f_main, (Int32,), "f_main"),
+        ], "f_main", Int32(5)) == "30"
+
+        # Multiple independent functions
+        f_double(x::Int32)::Int32 = x * Int32(2)
+        f_triple(x::Int32)::Int32 = x * Int32(3)
+
+        result = compile_module([
+            (f_double, (Int32,), "f_double"),
+            (f_triple, (Int32,), "f_triple"),
+        ]; module_format=:none)
+        @test occursin("f_double", result.js)
+        @test occursin("f_triple", result.js)
+        @test "f_double" in result.exports
+        @test "f_triple" in result.exports
+
+        # ESM format generates export statement
+        result_esm = compile_module([
+            (f_double, (Int32,), "f_double"),
+        ]; module_format=:esm)
+        @test occursin("export", result_esm.js)
+
+        # .dts generated for module
+        @test !isempty(result.dts)
+        @test occursin("f_double", result.dts)
+        @test occursin("f_triple", result.dts)
+    end
 end

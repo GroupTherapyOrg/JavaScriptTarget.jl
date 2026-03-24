@@ -751,8 +751,9 @@ function compile_module(functions::Vector;
 
     for entry in functions
         f, arg_types, name = entry
-        code_info, return_type = get_typed_ir(f, Tuple{arg_types...}; optimize=optimize)
-        ctx = JSCompilationContext(code_info, Tuple{arg_types...}, return_type, name)
+        arg_tuple = arg_types isa Tuple ? arg_types : Tuple(arg_types)
+        code_info, return_type = get_typed_ir(f, arg_tuple; optimize=optimize)
+        ctx = JSCompilationContext(code_info, arg_tuple, return_type, name)
         js_body = compile_function(ctx)
         print(buf, js_body)
         print(buf, "\n")

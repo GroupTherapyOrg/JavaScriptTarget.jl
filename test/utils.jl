@@ -45,6 +45,29 @@ if (typeof __result === 'boolean') {
 end
 
 """
+    compile_module_and_run(functions, call_name, args...) -> String
+
+Compile multiple functions into a module, call one by name, return result.
+"""
+function compile_module_and_run(functions, call_name::String, args...)
+    result = compile_module(functions; module_format=:none)
+    js_args = join([js_literal(a) for a in args], ", ")
+
+    test_code = """
+$(result.js)
+const __result = $(call_name)($(js_args));
+if (typeof __result === 'boolean') {
+  process.stdout.write(__result ? 'true' : 'false');
+} else if (__result === null || __result === undefined) {
+  process.stdout.write(String(__result));
+} else {
+  process.stdout.write(String(__result));
+}
+"""
+    return run_js(test_code)
+end
+
+"""
 Convert a Julia value to a JS literal string for use in test calls.
 """
 function js_literal(val)
