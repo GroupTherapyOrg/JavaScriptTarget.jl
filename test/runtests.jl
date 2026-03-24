@@ -1,5 +1,6 @@
 using Test
 using JavaScriptTarget
+using JSON
 
 include("utils.jl")
 
@@ -1895,5 +1896,496 @@ process.stdout.write(String(f_isempty("hello")));
 
         # Clean up
         isfile(types_bin) && rm(types_bin)
+    end
+
+    # =========================================================================
+    # PG-003: Parser.js tests
+    # =========================================================================
+    @testset "PG-003: Parser.js" begin
+        parser_js_path = joinpath(@__DIR__, "..", "src", "playground", "parser.js")
+        @test isfile(parser_js_path)
+
+        # Helper: run parser.js in Node.js and return JSON output
+        function parse_in_node(julia_code::String; mode="parse")
+            escaped = replace(julia_code, "\\" => "\\\\", "'" => "\\'", "\n" => "\\n")
+            js_code = """
+            const parser = require('$(replace(parser_js_path, "\\" => "\\\\"))');
+            const result = parser.$(mode)('$(escaped)');
+            process.stdout.write(JSON.stringify(result.ast));
+            """
+            return run_js(js_code)
+        end
+
+        function tokenize_in_node(julia_code::String)
+            escaped = replace(julia_code, "\\" => "\\\\", "'" => "\\'", "\n" => "\\n")
+            js_code = """
+            const parser = require('$(replace(parser_js_path, "\\" => "\\\\"))');
+            const tokens = parser.tokenize('$(escaped)');
+            const kinds = tokens.map(t => t.kind).filter(k => k !== 'EOF');
+            process.stdout.write(JSON.stringify(kinds));
+            """
+            return run_js(js_code)
+        end
+
+        @testset "Module loads" begin
+            js_code = """
+            const parser = require('$(replace(parser_js_path, "\\" => "\\\\"))');
+            const ok = typeof parser.parse === 'function' &&
+                       typeof parser.parseExpr === 'function' &&
+                       typeof parser.tokenize === 'function';
+            process.stdout.write(String(ok));
+            """
+            @test run_js(js_code) == "true"
+        end
+
+        @testset "Tokenization" begin
+            # Basic arithmetic tokens
+            result = tokenize_in_node("x * x + 1")
+            @test occursin("\"Ident\"", result)
+            @test occursin("\"*\"", result)
+            @test occursin("\"+\"", result)
+            @test occursin("\"Integer\"", result)
+
+            # Integer literals
+            result = tokenize_in_node("42 0xff 0b1010 0o77")
+            @test occursin("\"Integer\"", result)
+
+            # Float literals
+            result = tokenize_in_node("3.14 1e10 2.5e-3")
+            @test occursin("\"Float\"", result)
+
+            # String literal
+            result = tokenize_in_node("\"hello world\"")
+            @test occursin("\"String\"", result)
+
+            # Keywords
+            result = tokenize_in_node("function end if else while for return")
+            @test occursin("\"function\"", result)
+            @test occursin("\"end\"", result)
+            @test occursin("\"if\"", result)
+
+            # Comparison and logical operators
+            result = tokenize_in_node("a == b && c <= d || e !== f")
+            @test occursin("\"==\"", result)
+            @test occursin("\"&&\"", result)
+            @test occursin("\"<=\"", result)
+            @test occursin("\"||\"", result)
+            @test occursin("\"!==\"", result)
+
+            # Punctuation
+            result = tokenize_in_node("f(x, y)")
+            @test occursin("\"(\"", result)
+            @test occursin("\")\"", result)
+            @test occursin("\",\"", result)
+
+            # Type annotation
+            result = tokenize_in_node("x::Int32")
+            @test occursin("\"::\"", result)
+
+            # Arrow and assignment
+            result = tokenize_in_node("x -> x + 1")
+            @test occursin("\"->\"", result)
+
+            # Range operator
+            result = tokenize_in_node("1:10")
+            @test occursin("\":\"", result)
+        end
+
+        @testset "Expression parsing: x * x + 1" begin
+            # THE key test case from the story
+            result = parse_in_node("x * x + 1"; mode="parseExpr")
+            parsed = JSON.parse(result)
+
+            # Should be BinaryOp(+, BinaryOp(*, x, x), 1) — * binds tighter than +
+            @test parsed["kind"] == "BinaryOp"
+            @test parsed["op"] == "+"
+            @test parsed["left"]["kind"] == "BinaryOp"
+            @test parsed["left"]["op"] == "*"
+            @test parsed["left"]["left"]["kind"] == "Identifier"
+            @test parsed["left"]["left"]["name"] == "x"
+            @test parsed["left"]["right"]["kind"] == "Identifier"
+            @test parsed["left"]["right"]["name"] == "x"
+            @test parsed["right"]["kind"] == "Integer"
+            @test parsed["right"]["value"] == 1
+        end
+
+        @testset "Operator precedence" begin
+            # a + b * c → +(a, *(b, c))
+            result = parse_in_node("a + b * c"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "BinaryOp"
+            @test parsed["op"] == "+"
+            @test parsed["right"]["kind"] == "BinaryOp"
+            @test parsed["right"]["op"] == "*"
+
+            # a ^ b ^ c → ^(a, ^(b, c)) — right-associative
+            result = parse_in_node("a ^ b ^ c"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "BinaryOp"
+            @test parsed["op"] == "^"
+            @test parsed["right"]["kind"] == "BinaryOp"
+            @test parsed["right"]["op"] == "^"
+
+            # a - b + c → +(-(a, b), c) — left-associative
+            result = parse_in_node("a - b + c"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "BinaryOp"
+            @test parsed["op"] == "+"
+            @test parsed["left"]["kind"] == "BinaryOp"
+            @test parsed["left"]["op"] == "-"
+
+            # -x → UnaryOp(-, x)
+            result = parse_in_node("-x"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "UnaryOp"
+            @test parsed["op"] == "-"
+            @test parsed["operand"]["kind"] == "Identifier"
+
+            # Unary minus on integer folds: -42
+            result = parse_in_node("-42"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Integer"
+            @test parsed["value"] == -42
+        end
+
+        @testset "Literals" begin
+            # Integers
+            result = parse_in_node("42"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Integer"
+            @test parsed["value"] == 42
+
+            # Hex
+            result = parse_in_node("0xff"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Integer"
+            @test parsed["value"] == 255
+
+            # Float
+            result = parse_in_node("3.14"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Float"
+            @test parsed["value"] ≈ 3.14
+
+            # Bool
+            result = parse_in_node("true"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Bool"
+            @test parsed["value"] == true
+
+            # Nothing
+            result = parse_in_node("nothing"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Nothing"
+
+            # String
+            result = parse_in_node("\"hello\""; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "StringLit"
+            @test parsed["value"] == "hello"
+
+            # Char
+            result = parse_in_node("'a'"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "CharLit"
+            @test parsed["value"] == "a"
+        end
+
+        @testset "Function calls" begin
+            # Simple call: f(x, y)
+            result = parse_in_node("f(x, y)"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Call"
+            @test parsed["func"]["name"] == "f"
+            @test length(parsed["args"]) == 2
+
+            # Nested call: f(g(x))
+            result = parse_in_node("f(g(x))"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Call"
+            @test parsed["args"][1]["kind"] == "Call"
+
+            # No-arg call: f()
+            result = parse_in_node("f()"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Call"
+            @test length(parsed["args"]) == 0
+        end
+
+        @testset "Field access and indexing" begin
+            # Field access: a.b
+            result = parse_in_node("a.b"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "DotAccess"
+            @test parsed["field"] == "b"
+
+            # Chained: a.b.c
+            result = parse_in_node("a.b.c"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "DotAccess"
+            @test parsed["field"] == "c"
+            @test parsed["object"]["kind"] == "DotAccess"
+
+            # Indexing: a[1]
+            result = parse_in_node("a[1]"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Index"
+            @test parsed["indices"][1]["value"] == 1
+        end
+
+        @testset "Lambda expressions" begin
+            # x -> x + 1
+            result = parse_in_node("x -> x + 1"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Lambda"
+            @test length(parsed["params"]) == 1
+            @test parsed["params"][1]["name"] == "x"
+            @test parsed["body"]["kind"] == "BinaryOp"
+        end
+
+        @testset "Ternary operator" begin
+            result = parse_in_node("x > 0 ? x : -x"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Ternary"
+            @test parsed["condition"]["kind"] == "BinaryOp"
+            @test parsed["condition"]["op"] == ">"
+        end
+
+        @testset "Range expressions" begin
+            # 1:10
+            result = parse_in_node("1:10"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Range"
+            @test parsed["start"]["value"] == 1
+            @test parsed["stop"]["value"] == 10
+            @test parsed["step"] === nothing
+
+            # 1:2:10
+            result = parse_in_node("1:2:10"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Range"
+            @test parsed["step"]["value"] == 2
+        end
+
+        @testset "Logical operators" begin
+            # a && b
+            result = parse_in_node("a && b"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "And"
+
+            # a || b
+            result = parse_in_node("a || b"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Or"
+
+            # Precedence: a || b && c → Or(a, And(b, c))
+            result = parse_in_node("a || b && c"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Or"
+            @test parsed["right"]["kind"] == "And"
+        end
+
+        @testset "Comparison chains" begin
+            # a < b
+            result = parse_in_node("a < b"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "BinaryOp"
+            @test parsed["op"] == "<"
+
+            # a < b < c → Comparison([<, <], [a, b, c])
+            result = parse_in_node("a < b < c"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Comparison"
+            @test length(parsed["ops"]) == 2
+        end
+
+        @testset "Array literals" begin
+            result = parse_in_node("[1, 2, 3]"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "ArrayLit"
+            @test length(parsed["elements"]) == 3
+
+            # Empty array
+            result = parse_in_node("[]"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "ArrayLit"
+            @test length(parsed["elements"]) == 0
+        end
+
+        @testset "Tuple expressions" begin
+            result = parse_in_node("(1, 2, 3)"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Tuple"
+            @test length(parsed["elements"]) == 3
+        end
+
+        @testset "Type annotations" begin
+            result = parse_in_node("x::Int32"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "TypeAnnotation"
+            @test parsed["expr"]["name"] == "x"
+            @test parsed["type"]["name"] == "Int32"
+        end
+
+        @testset "Function definition" begin
+            code = "function f(x::Int32)\n  return x * x + 1\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Module"
+            fn = parsed["body"][1]
+            @test fn["kind"] == "FunctionDef"
+            @test fn["name"] == "f"
+            @test length(fn["params"]) == 1
+            @test fn["params"][1]["name"] == "x"
+            @test fn["params"][1]["type"]["name"] == "Int32"
+        end
+
+        @testset "Short-form function" begin
+            code = "f(x) = x * x + 1"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            fn = parsed["body"][1]
+            @test fn["kind"] == "FunctionDef"
+            @test fn["name"] == "f"
+            @test fn["isShort"] == true
+        end
+
+        @testset "Struct definition" begin
+            code = "struct Point\n  x::Float64\n  y::Float64\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            st = parsed["body"][1]
+            @test st["kind"] == "StructDef"
+            @test st["name"] == "Point"
+            @test st["mutable"] == false
+            @test length(st["fields"]) == 2
+            @test st["fields"][1]["name"] == "x"
+            @test st["fields"][1]["type"]["name"] == "Float64"
+        end
+
+        @testset "Mutable struct" begin
+            code = "mutable struct Counter\n  value::Int64\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            st = parsed["body"][1]
+            @test st["kind"] == "StructDef"
+            @test st["mutable"] == true
+        end
+
+        @testset "Abstract type" begin
+            code = "abstract type Shape end"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            at = parsed["body"][1]
+            @test at["kind"] == "AbstractTypeDef"
+            @test at["name"] == "Shape"
+        end
+
+        @testset "If/elseif/else" begin
+            code = "if x > 0\n  1\nelseif x < 0\n  -1\nelse\n  0\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            ifn = parsed["body"][1]
+            @test ifn["kind"] == "If"
+            @test length(ifn["elseifs"]) == 1
+            @test length(ifn["else"]) == 1
+        end
+
+        @testset "While loop" begin
+            code = "while x > 0\n  x = x - 1\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            wh = parsed["body"][1]
+            @test wh["kind"] == "While"
+        end
+
+        @testset "For loop" begin
+            code = "for i in 1:10\n  println(i)\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            fo = parsed["body"][1]
+            @test fo["kind"] == "For"
+            @test fo["var"] == "i"
+            @test fo["iter"]["kind"] == "Range"
+        end
+
+        @testset "Try/catch" begin
+            code = "try\n  error(\"oops\")\ncatch e\n  println(e)\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            tc = parsed["body"][1]
+            @test tc["kind"] == "TryCatch"
+            @test tc["catchVar"] == "e"
+        end
+
+        @testset "Comprehension" begin
+            result = parse_in_node("[x^2 for x in 1:10]"; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Comprehension"
+            @test length(parsed["generators"]) == 1
+            @test parsed["generators"][1]["var"] == "x"
+        end
+
+        @testset "String interpolation" begin
+            code = "\"hello \$(name)!\""
+            result = parse_in_node(code; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "StringInterp"
+            @test length(parsed["parts"]) >= 2
+        end
+
+        @testset "Multiple statements" begin
+            code = "x = 1\ny = x + 2\nz = x * y"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Module"
+            @test length(parsed["body"]) == 3
+            @test parsed["body"][1]["kind"] == "Assignment"
+        end
+
+        @testset "Struct with supertype" begin
+            code = "struct Circle <: Shape\n  radius::Float64\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            st = parsed["body"][1]
+            @test st["kind"] == "StructDef"
+            @test st["supertype"]["name"] == "Shape"
+        end
+
+        @testset "Parametric struct" begin
+            code = "struct Container{T}\n  value::T\nend"
+            result = parse_in_node(code)
+            parsed = JSON.parse(result)
+            st = parsed["body"][1]
+            @test st["kind"] == "StructDef"
+            @test length(st["params"]) == 1
+        end
+
+        @testset "Complex expression: Euclidean distance" begin
+            code = "sqrt((x2 - x1)^2 + (y2 - y1)^2)"
+            result = parse_in_node(code; mode="parseExpr")
+            parsed = JSON.parse(result)
+            @test parsed["kind"] == "Call"
+            @test parsed["func"]["name"] == "sqrt"
+        end
+
+        @testset "No diagnostics for valid code" begin
+            codes = [
+                "x * x + 1",
+                "function f(x) return x end",
+                "if x > 0 1 else 0 end",
+                "for i in 1:10 println(i) end",
+                "[x^2 for x in 1:10]",
+            ]
+            for code in codes
+                escaped = replace(code, "\\" => "\\\\", "'" => "\\'", "\n" => "\\n")
+                js_code = """
+                const parser = require('$(replace(parser_js_path, "\\" => "\\\\"))');
+                const result = parser.parse('$(escaped)');
+                process.stdout.write(String(result.diagnostics.length));
+                """
+                @test run_js(js_code) == "0"
+            end
+        end
     end
 end
