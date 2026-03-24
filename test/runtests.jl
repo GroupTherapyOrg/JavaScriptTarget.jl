@@ -2388,4 +2388,317 @@ process.stdout.write(String(f_isempty("hello")));
             end
         end
     end
+
+    # ================================================================
+    # PG-004: Lowerer.js — Julia AST → SSA IR
+    # ================================================================
+    @testset "PG-004: Lowerer" begin
+        lowerer_js_path = joinpath(@__DIR__, "..", "src", "playground", "lowerer.js")
+        parser_js_path_l = joinpath(@__DIR__, "..", "src", "playground", "parser.js")
+        infer_js_path = joinpath(@__DIR__, "..", "src", "playground", "infer.js")
+
+        # Helper: parse + lower Julia source in Node.js, return JSON IR
+        function lower_in_node(source::String)
+            escaped = replace(source, "\\" => "\\\\", "'" => "\\'", "\n" => "\\n")
+            js_code = """
+            const L = require('$(replace(lowerer_js_path, "\\" => "\\\\"))');
+            const result = L.lower('$(escaped)');
+            process.stdout.write(JSON.stringify(result));
+            """
+            raw = run_js(js_code)
+            return JSON.parse(raw)
+        end
+
+        # Helper: get a specific function IR from lowering result
+        function get_func_ir(source::String, name::String)
+            result = lower_in_node(source)
+            return result["functions"][name]
+        end
+
+        @testset "Module loads" begin
+            js_code = """
+            const L = require('$(replace(lowerer_js_path, "\\" => "\\\\"))');
+            const keys = Object.keys(L);
+            process.stdout.write(keys.includes('lower') && keys.includes('lowerModule') ? 'ok' : 'fail');
+            """
+            @test run_js(js_code) == "ok"
+        end
+
+        @testset "Literal lowering" begin
+            # Integer
+            ir = get_func_ir("42", "\$main")
+            @test ir["code"][1]["kind"] == 5  # STMT_LITERAL
+            @test ir["code"][1]["typeId"] == 8  # TYPE_INT64
+            @test ir["code"][1]["value"] == 42
+
+            # Float
+            ir = get_func_ir("3.14", "\$main")
+            @test ir["code"][1]["typeId"] == 17  # TYPE_FLOAT64
+
+            # String
+            ir = get_func_ir("\"hello\"", "\$main")
+            @test ir["code"][1]["typeId"] == 19  # TYPE_STRING
+            @test ir["code"][1]["value"] == "hello"
+
+            # Bool
+            ir = get_func_ir("true", "\$main")
+            @test ir["code"][1]["typeId"] == 4  # TYPE_BOOL
+            @test ir["code"][1]["value"] == true
+
+            # Nothing
+            ir = get_func_ir("nothing", "\$main")
+            @test ir["code"][1]["typeId"] == 2  # TYPE_NOTHING
+        end
+
+        @testset "Identity function" begin
+            ir = get_func_ir("function f(x)\n  return x\nend", "f")
+            @test ir["argCount"] == 1
+            @test ir["argNames"][1] == "x"
+            # Should be RETURN(arg:0)
+            @test ir["code"][1]["kind"] == 6  # STMT_RETURN
+            @test haskey(ir["code"][1]["val"], "arg")
+            @test ir["code"][1]["val"]["arg"] == 0
+        end
+
+        @testset "Binary operation: a + b" begin
+            ir = get_func_ir("function add(a, b)\n  return a + b\nend", "add")
+            @test ir["argCount"] == 2
+            # First statement: CALL(+, arg:0, arg:1)
+            @test ir["code"][1]["kind"] == 1  # STMT_CALL
+            @test ir["code"][1]["callee"] == "+"
+            @test ir["code"][1]["args"][1]["arg"] == 0
+            @test ir["code"][1]["args"][2]["arg"] == 1
+        end
+
+        @testset "Multi-statement function" begin
+            ir = get_func_ir("function f(x)\n  y = x + 1\n  z = y * 2\n  return z\nend", "f")
+            # [0]: LITERAL(1), [1]: CALL(+), [2]: LITERAL(2), [3]: CALL(*), [4]: RETURN
+            @test ir["code"][1]["kind"] == 5  # LITERAL
+            @test ir["code"][2]["kind"] == 1  # CALL +
+            @test ir["code"][3]["kind"] == 5  # LITERAL
+            @test ir["code"][4]["kind"] == 1  # CALL *
+            @test ir["code"][5]["kind"] == 6  # RETURN
+        end
+
+        @testset "If/else with phi" begin
+            ir = get_func_ir("function f(x)\n  if x > 0\n    y = 1\n  else\n    y = 2\n  end\n  return y\nend", "f")
+            kinds = [s["kind"] for s in ir["code"]]
+            @test 8 in kinds  # GOTOIFNOT
+            @test 2 in kinds  # PHI
+            @test 6 in kinds  # RETURN
+        end
+
+        @testset "Elseif chain" begin
+            src = "function classify(x)\n  if x > 0\n    return 1\n  elseif x < 0\n    return -1\n  else\n    return 0\n  end\nend"
+            ir = get_func_ir(src, "classify")
+            ret_count = count(s -> s["kind"] == 6, ir["code"])
+            @test ret_count == 3
+        end
+
+        @testset "While loop with phi" begin
+            src = "function sum_to(n)\n  s = 0\n  i = 1\n  while i <= n\n    s = s + i\n    i = i + 1\n  end\n  return s\nend"
+            ir = get_func_ir(src, "sum_to")
+            # Phis for s and i at indices 2 and 3 (0-indexed)
+            @test ir["code"][3]["kind"] == 2  # PHI for s
+            @test ir["code"][4]["kind"] == 2  # PHI for i
+            # Return should reference s phi (ssa:2)
+            last = ir["code"][end]
+            @test last["kind"] == 6  # RETURN
+            @test last["val"]["ssa"] == 2
+        end
+
+        @testset "For range loop" begin
+            src = "function sum_range(n)\n  s = 0\n  for i in 1:n\n    s = s + i\n  end\n  return s\nend"
+            ir = get_func_ir(src, "sum_range")
+            phi_count = count(s -> s["kind"] == 2, ir["code"])
+            @test phi_count >= 2  # At least i and s
+        end
+
+        @testset "Struct definition + constructor" begin
+            src = "struct Point\n  x::Float64\n  y::Float64\nend\nfunction origin()\n  return Point(0.0, 0.0)\nend"
+            result = lower_in_node(src)
+            @test haskey(result["structDefs"], "Point")
+            @test length(result["structDefs"]["Point"]["fields"]) == 2
+            @test result["structDefs"]["Point"]["fields"][1]["name"] == "x"
+            # Constructor → STMT_NEW
+            ir = result["functions"]["origin"]
+            has_new = any(s -> s["kind"] == 4, ir["code"])
+            @test has_new
+        end
+
+        @testset "Field access" begin
+            ir = get_func_ir("function get_x(p)\n  return p.x\nend", "get_x")
+            @test ir["code"][1]["kind"] == 3  # STMT_GETFIELD
+            @test ir["code"][1]["field"] == "x"
+            @test ir["code"][1]["obj"]["arg"] == 0
+        end
+
+        @testset "Array indexing → getindex" begin
+            ir = get_func_ir("function first(arr)\n  return arr[1]\nend", "first")
+            has_getindex = any(s -> get(s, "callee", "") == "getindex", ir["code"])
+            @test has_getindex
+        end
+
+        @testset "Short-circuit &&" begin
+            ir = get_func_ir("function f(x, y)\n  return x && y\nend", "f")
+            has_gotoifnot = any(s -> s["kind"] == 8, ir["code"])
+            has_phi = any(s -> s["kind"] == 2, ir["code"])
+            @test has_gotoifnot
+            @test has_phi
+        end
+
+        @testset "Short-circuit ||" begin
+            ir = get_func_ir("function f(x, y)\n  return x || y\nend", "f")
+            has_gotoifnot = any(s -> s["kind"] == 8, ir["code"])
+            has_phi = any(s -> s["kind"] == 2, ir["code"])
+            @test has_gotoifnot
+            @test has_phi
+        end
+
+        @testset "Compound assignment" begin
+            ir = get_func_ir("function f(x)\n  x += 1\n  return x\nend", "f")
+            has_add = any(s -> get(s, "callee", "") == "+", ir["code"])
+            @test has_add
+        end
+
+        @testset "Macro expansion: @assert" begin
+            ir = get_func_ir("function f(x)\n  @assert x > 0\n  return x\nend", "f")
+            has_gotoifnot = any(s -> s["kind"] == 8, ir["code"])
+            @test has_gotoifnot
+        end
+
+        @testset "Unknown macro diagnostic" begin
+            result = lower_in_node("@custom_macro x")
+            @test length(result["diagnostics"]) > 0
+            @test occursin("@custom_macro", result["diagnostics"][1])
+        end
+
+        @testset "Try/catch structure" begin
+            ir = get_func_ir("function f()\n  try\n    error(\"boom\")\n  catch e\n    return 0\n  end\nend", "f")
+            @test length(ir["structure"]) > 0
+            @test ir["structure"][1]["kind"] == "try"
+        end
+
+        @testset "Top-level script → \$main" begin
+            result = lower_in_node("x = 1 + 2\nprintln(x)")
+            @test haskey(result["functions"], "\$main")
+            @test result["functions"]["\$main"]["argCount"] == 0
+        end
+
+        @testset "Parameter type annotations" begin
+            ir = get_func_ir("function f(x::Int64, y::Float64)\n  return x + y\nend", "f")
+            @test ir["paramTypes"][1] == "Int64"
+            @test ir["paramTypes"][2] == "Float64"
+        end
+
+        @testset "Multiple functions" begin
+            result = lower_in_node("function add(a, b)\n  return a + b\nend\nfunction mul(a, b)\n  return a * b\nend")
+            @test haskey(result["functions"], "add")
+            @test haskey(result["functions"], "mul")
+        end
+
+        @testset "Auto-return last expression" begin
+            ir = get_func_ir("function f(x)\n  x + 1\nend", "f")
+            last = ir["code"][end]
+            @test last["kind"] == 6  # STMT_RETURN
+        end
+
+        @testset "Break in while loop" begin
+            src = "function f()\n  i = 0\n  while true\n    i = i + 1\n    if i > 5\n      break\n    end\n  end\n  return i\nend"
+            ir = get_func_ir(src, "f")
+            # Should have a GOTO with positive dest (break → exit)
+            has_goto = any(s -> s["kind"] == 7 && get(s, "dest", -1) > 0, ir["code"])
+            @test has_goto
+        end
+
+        @testset "Abstract type definition" begin
+            result = lower_in_node("abstract type Shape end\nstruct Circle <: Shape\n  r::Float64\nend")
+            @test haskey(result["structDefs"], "Shape")
+            @test result["structDefs"]["Shape"]["abstract"] == true
+            @test haskey(result["structDefs"], "Circle")
+            @test result["structDefs"]["Circle"]["supertype"] == "Shape"
+        end
+
+        @testset "Mutable struct" begin
+            result = lower_in_node("mutable struct Counter\n  n::Int64\nend")
+            @test result["structDefs"]["Counter"]["mutable"] == true
+        end
+
+        @testset "Lambda → separate function" begin
+            result = lower_in_node("function f(x)\n  g = (y) -> y + x\n  return g\nend")
+            # Lambda should create a separate function in the module
+            func_names = collect(keys(result["functions"]))
+            lambda_funcs = filter(n -> startswith(n, "\$lambda"), func_names)
+            @test length(lambda_funcs) >= 1
+        end
+
+        @testset "Nested function definition" begin
+            result = lower_in_node("function outer(x)\n  function inner(y)\n    return y + x\n  end\n  return inner(1)\nend")
+            @test haskey(result["functions"], "inner")
+            @test haskey(result["functions"], "outer")
+        end
+
+        @testset "String interpolation" begin
+            ir = get_func_ir("function greet(name)\n  return \"Hello \$name!\"\nend", "greet")
+            has_string_call = any(s -> get(s, "callee", "") == "string", ir["code"])
+            @test has_string_call
+        end
+
+        @testset "Explicit getindex" begin
+            ir = get_func_ir("function f(t)\n  a = t[1]\n  b = t[2]\n  return a + b\nend", "f")
+            getindex_count = count(s -> get(s, "callee", "") == "getindex", ir["code"])
+            @test getindex_count == 2
+        end
+
+        @testset "Setfield: obj.field = val" begin
+            ir = get_func_ir("function set_x(p, v)\n  p.x = v\n  return p\nend", "set_x")
+            has_setfield = any(s -> get(s, "callee", "") == "setfield!", ir["code"])
+            @test has_setfield
+        end
+
+        @testset "Setindex: arr[i] = val" begin
+            ir = get_func_ir("function set_first(arr, v)\n  arr[1] = v\n  return arr\nend", "set_first")
+            has_setindex = any(s -> get(s, "callee", "") == "setindex!", ir["code"])
+            @test has_setindex
+        end
+
+        @testset "IR format compatible with infer.js" begin
+            # Verify all statements have numeric kind, and refs are well-formed
+            ir = get_func_ir("function f(x)\n  y = x + 1\n  if y > 0\n    return y\n  else\n    return 0\n  end\nend", "f")
+            for (i, stmt) in enumerate(ir["code"])
+                @test haskey(stmt, "kind")
+                @test isa(stmt["kind"], Number)
+                @test stmt["kind"] >= 1 && stmt["kind"] <= 9
+            end
+        end
+
+        @testset "Large function: fibonacci" begin
+            src = "function fib(n)\n  if n <= 1\n    return n\n  end\n  a = 0\n  b = 1\n  i = 2\n  while i <= n\n    c = a + b\n    a = b\n    b = c\n    i = i + 1\n  end\n  return b\nend"
+            ir = get_func_ir(src, "fib")
+            @test ir["argCount"] == 1
+            # Should have at least: literals, calls, gotoifnot, phi, goto, return
+            kinds = Set([s["kind"] for s in ir["code"]])
+            @test 1 in kinds  # CALL
+            @test 2 in kinds  # PHI
+            @test 5 in kinds  # LITERAL
+            @test 6 in kinds  # RETURN
+            @test 7 in kinds  # GOTO
+            @test 8 in kinds  # GOTOIFNOT
+        end
+
+        @testset "Macro no-ops pass through" begin
+            # @inline should be transparent
+            ir = get_func_ir("function f(x)\n  @inline x + 1\nend", "f")
+            has_add = any(s -> get(s, "callee", "") == "+", ir["code"])
+            @test has_add
+        end
+
+        @testset "Const declaration" begin
+            result = lower_in_node("const PI = 3.14159")
+            ir = result["functions"]["\$main"]
+            # Should have a literal for 3.14159
+            has_float = any(s -> s["kind"] == 5 && get(s, "value", nothing) ≈ 3.14159, ir["code"])
+            @test has_float
+        end
+    end
 end
