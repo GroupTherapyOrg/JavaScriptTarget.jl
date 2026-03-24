@@ -3377,4 +3377,49 @@ process.stdout.write(String(f_isempty("hello")));
             @test pg_eval("println(string(1, \"+\", 2, \"=\", 3))") == "1+2=3"
         end
     end
+
+    # ==============================================================
+    # DOC-001: Documenter.jl site
+    # ==============================================================
+
+    @testset "DOC-001: Documenter.jl site" begin
+        docs_dir = joinpath(@__DIR__, "..", "docs")
+
+        @testset "docs/make.jl exists" begin
+            @test isfile(joinpath(docs_dir, "make.jl"))
+        end
+
+        @testset "docs/Project.toml exists" begin
+            @test isfile(joinpath(docs_dir, "Project.toml"))
+            content = read(joinpath(docs_dir, "Project.toml"), String)
+            @test occursin("Documenter", content)
+        end
+
+        @testset "docs/src pages exist" begin
+            src = joinpath(docs_dir, "src")
+            @test isfile(joinpath(src, "index.md"))
+            @test isfile(joinpath(src, "getting_started.md"))
+            @test isfile(joinpath(src, "api.md"))
+            @test isfile(joinpath(src, "supported_functions.md"))
+            @test isfile(joinpath(src, "architecture.md"))
+        end
+
+        @testset "index.md has playground embed" begin
+            content = read(joinpath(docs_dir, "src", "index.md"), String)
+            @test occursin("playground", content)
+            @test occursin("iframe", content)
+        end
+
+        @testset "api.md has @docs blocks" begin
+            content = read(joinpath(docs_dir, "src", "api.md"), String)
+            @test occursin("compile", content)
+            @test occursin("compile_module", content)
+            @test occursin("JSOutput", content)
+            @test occursin("build_playground", content)
+        end
+
+        @testset "playground embed CSS exists" begin
+            @test isfile(joinpath(docs_dir, "src", "assets", "playground-embed.css"))
+        end
+    end
 end

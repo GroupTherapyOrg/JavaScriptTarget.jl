@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+JavaScriptTarget = "91c6ed5a-2d04-438e-9585-7332732578c7"
+
+[compat]
+Documenter = "1"
