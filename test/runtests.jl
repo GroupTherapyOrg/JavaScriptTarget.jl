@@ -900,4 +900,129 @@ process.stdout.write(String(f_isempty("hello")));
             @test run_js(js2) == "false"
         end
     end
+
+    @testset "RT-003: .d.ts generation" begin
+        # --- Primitive type mapping ---
+        @testset "Primitive types in .d.ts" begin
+            f_int(x::Int32) = x
+            result = compile(f_int, (Int32,))
+            @test occursin("x: number", result.dts)
+            @test occursin(": number;", result.dts)
+
+            f_bool(x::Bool) = x
+            result2 = compile(f_bool, (Bool,))
+            @test occursin("x: boolean", result2.dts)
+
+            f_str(s::String) = s
+            result3 = compile(f_str, (String,))
+            @test occursin("s: string", result3.dts)
+            @test occursin(": string;", result3.dts)
+
+            f_nothing()::Nothing = nothing
+            result4 = compile(f_nothing, ())
+            @test occursin(": null;", result4.dts)
+        end
+
+        # --- Branded struct types ---
+        @testset "Branded struct .d.ts" begin
+            struct DtsVec2
+                x::Float64
+                y::Float64
+            end
+            f_dts_vec(v::DtsVec2) = v.x + v.y
+            result = compile(f_dts_vec, (DtsVec2,))
+
+            # Should have a declare class with branded type
+            @test occursin("declare class DtsVec2", result.dts)
+            @test occursin("readonly x: number;", result.dts)
+            @test occursin("readonly y: number;", result.dts)
+            @test occursin("__brand: unique symbol", result.dts)
+            @test occursin("constructor(x: number, y: number);", result.dts)
+
+            # Function should reference the struct type
+            @test occursin("v: DtsVec2", result.dts)
+        end
+
+        # --- Mutable struct (no brand, writable fields) ---
+        @testset "Mutable struct .d.ts" begin
+            mutable struct DtsMPoint
+                x::Float64
+                y::Float64
+            end
+            function f_dts_move!(p::DtsMPoint, dx::Float64)::Nothing
+                p.x += dx
+                return nothing
+            end
+            result = compile(f_dts_move!, (DtsMPoint, Float64))
+
+            @test occursin("declare class DtsMPoint", result.dts)
+            # Mutable: writable fields (no readonly)
+            @test occursin("x: number;", result.dts)
+            @test !occursin("readonly x:", result.dts)
+            # Mutable: no brand
+            @test !occursin("__brand", result.dts)
+        end
+
+        # --- Union types ---
+        @testset "Union types in .d.ts" begin
+            f_union(x::Union{Nothing, Int32})::Int32 = x === nothing ? Int32(0) : x
+            result = compile(f_union, (Union{Nothing, Int32},))
+            @test occursin("null | number", result.dts) || occursin("number | null", result.dts)
+        end
+
+        # --- Container types ---
+        @testset "Container types in .d.ts" begin
+            f_vec(v::Vector{Float64}) = v
+            result = compile(f_vec, (Vector{Float64},))
+            @test occursin("Array<number>", result.dts)
+
+            f_dict(d::Dict{String, Int32}) = d
+            result2 = compile(f_dict, (Dict{String, Int32},))
+            @test occursin("Map<string, number>", result2.dts)
+
+            f_set(s::Set{String}) = s
+            result3 = compile(f_set, (Set{String},))
+            @test occursin("Set<string>", result3.dts)
+        end
+
+        # --- Tuple return types ---
+        @testset "Tuple types in .d.ts" begin
+            f_tuple(a::Int32, b::Float64) = (a, b)
+            result = compile(f_tuple, (Int32, Float64))
+            @test occursin("readonly [number, number]", result.dts)
+        end
+
+        # --- Module .d.ts ---
+        @testset "Module .d.ts with structs" begin
+            struct DtsColor
+                r::Int32
+                g::Int32
+                b::Int32
+            end
+            f_red(c::DtsColor) = c.r
+            f_green(c::DtsColor) = c.g
+
+            result = compile_module([
+                (f_red, (DtsColor,), "f_red"),
+                (f_green, (DtsColor,), "f_green"),
+            ])
+            # Struct declaration should appear once
+            @test occursin("declare class DtsColor", result.dts)
+            @test occursin("readonly r: number;", result.dts)
+            # Both function declarations
+            @test occursin("f_red(c: DtsColor): number", result.dts)
+            @test occursin("f_green(c: DtsColor): number", result.dts)
+        end
+
+        # --- Parametric struct .d.ts ---
+        @testset "Parametric struct .d.ts" begin
+            struct DtsWrapper{T}
+                value::T
+            end
+            f_wrap(x::Int32) = DtsWrapper{Int32}(x)
+            result = compile(f_wrap, (Int32,))
+            @test occursin("declare class DtsWrapper", result.dts)
+            @test occursin("constructor", result.dts)
+        end
+    end
 end

@@ -1446,10 +1446,18 @@ function compile(f, arg_types::Tuple;
 
     dts_str = ""
     if dts
+        dts_buf = IOBuffer()
+        # Emit struct type declarations (branded types)
+        for T in ctx.struct_types
+            print(dts_buf, generate_struct_dts(T))
+            print(dts_buf, "\n")
+        end
+        # Emit function declaration
         arg_dts = [js_type_string(t) for t in arg_types]
         params = join(["$(ctx.arg_names[i]): $(arg_dts[i])" for i in 1:length(arg_types)], ", ")
         ret_dts = js_type_string(return_type)
-        dts_str = "export declare function $(name)($(params)): $(ret_dts);\n"
+        print(dts_buf, "export declare function $(name)($(params)): $(ret_dts);\n")
+        dts_str = String(take!(dts_buf))
     end
 
     return JSOutput(js, dts_str, "", [name], sizeof(js))
@@ -1473,11 +1481,24 @@ function compile_module(functions::Vector;
     all_type_ids = Dict{DataType, Int}()
     all_required_runtime = Set{Symbol}()
 
+    all_fn_dts = IOBuffer()  # Function declarations only
     for entry in functions
         f, arg_types, name = entry
         arg_tuple = arg_types isa Tuple ? arg_types : Tuple(arg_types)
         code_info, return_type = get_typed_ir(f, arg_tuple; optimize=optimize)
         ctx = JSCompilationContext(code_info, arg_tuple, return_type, name)
+
+        # Register struct types from arguments (same as compile())
+        for T in arg_tuple
+            register_struct_types!(ctx, T)
+            if T isa DataType && isabstracttype(T)
+                for S in concrete_subtypes(T)
+                    register_struct_types!(ctx, S)
+                end
+                assign_type_ids!(ctx, T)
+            end
+        end
+
         js_body = compile_function(ctx)
         union!(all_struct_types, ctx.struct_types)
         merge!(all_type_ids, ctx.type_ids)
@@ -1490,7 +1511,7 @@ function compile_module(functions::Vector;
             arg_dts = [js_type_string(t) for t in arg_types]
             params = join(["$(ctx.arg_names[i]): $(arg_dts[i])" for i in 1:length(arg_types)], ", ")
             ret_dts = js_type_string(return_type)
-            print(dts_buf, "export declare function $(name)($(params)): $(ret_dts);\n")
+            print(all_fn_dts, "export declare function $(name)($(params)): $(ret_dts);\n")
         end
     end
 
@@ -1512,6 +1533,15 @@ function compile_module(functions::Vector;
     end
 
     js = js_body_str
+
+    # Build .d.ts: struct declarations first, then function declarations
+    if dts
+        for T in all_struct_types
+            print(dts_buf, generate_struct_dts(T))
+            print(dts_buf, "\n")
+        end
+        print(dts_buf, String(take!(all_fn_dts)))
+    end
     dts_str = String(take!(dts_buf))
     return JSOutput(js, dts_str, "", export_names, sizeof(js))
 end
