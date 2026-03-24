@@ -684,4 +684,49 @@ process.stdout.write(String(f_sum_arr([42])));
         end
         @test compile_and_run(f_sum_squares, (Int32,), Int32(5)) == "55"
     end
+
+    @testset "CO-003: Dict and Set" begin
+        # Dict: create, set, get
+        function f_dict_basic(k::String, v::Int32)::Int32
+            d = Dict{String, Int32}()
+            d[k] = v
+            return d[k]
+        end
+        result = compile(f_dict_basic, (String, Int32); module_format=:none)
+        @test occursin("new Map()", result.js)
+        js1 = """
+$(result.js)
+process.stdout.write(String(f_dict_basic("hello", 42)));
+"""
+        @test run_js(js1) == "42"
+
+        # Dict: set multiple keys, get second
+        function f_dict_multi(a::String, b::String)::Int32
+            d = Dict{String, Int32}()
+            d[a] = Int32(10)
+            d[b] = Int32(20)
+            return d[b]
+        end
+        result2 = compile(f_dict_multi, (String, String); module_format=:none)
+        js2 = """
+$(result2.js)
+process.stdout.write(String(f_dict_multi("x", "y")));
+"""
+        @test run_js(js2) == "20"
+
+        # Dict: delete key, access remaining
+        function f_dict_delete(k1::String, k2::String)::Int32
+            d = Dict{String, Int32}()
+            d[k1] = Int32(10)
+            d[k2] = Int32(20)
+            delete!(d, k1)
+            return d[k2]
+        end
+        result3 = compile(f_dict_delete, (String, String); module_format=:none)
+        js3 = """
+$(result3.js)
+process.stdout.write(String(f_dict_delete("a", "b")));
+"""
+        @test run_js(js3) == "20"
+    end
 end

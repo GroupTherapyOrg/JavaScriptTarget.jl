@@ -459,6 +459,12 @@ function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
             name = ctx.js_locals[idx]
             print(buf, "$(indent)$(name) = false;\n")
         end
+    elseif expr.head === :foreigncall || expr.head === :gc_preserve_begin || expr.head === :gc_preserve_end
+        # Low-level operations: no-op in JS
+        if haskey(ctx.js_locals, idx)
+            name = ctx.js_locals[idx]
+            print(buf, "$(indent)$(name) = undefined;\n")
+        end
     end
 end
 
@@ -577,11 +583,29 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             end
         end
 
-        # Skip internal Vector fields (ref, size, etc.)
-        if field_arg isa QuoteNode && field_arg.value in (:ref, :size, :mem, :length)
+        # Skip internal Vector/Memory/Ptr fields
+        if field_arg isa QuoteNode
             obj_type = _get_ssa_type(ctx, obj)
-            if obj_type !== nothing && (obj_type <: AbstractArray || obj_type <: Memory)
-                return "/* internal: $(field_arg.value) */ undefined"
+            if obj_type !== nothing
+                if obj_type <: Memory || (obj_type isa DataType && obj_type <: Ptr)
+                    return "/* memory internal */ undefined"
+                end
+                if (obj_type <: AbstractArray) && field_arg.value in (:ref, :size, :mem, :length)
+                    return "/* internal: $(field_arg.value) */ undefined"
+                end
+            end
+        end
+
+        # Dict fields: count → .size, skip internal fields
+        if field_arg isa QuoteNode
+            obj_type = _get_ssa_type(ctx, obj)
+            if obj_type !== nothing && obj_type <: AbstractDict
+                if field_arg.value === :count
+                    obj_val = compile_value(ctx, obj)
+                    return "$(obj_val).size"
+                elseif field_arg.value in (:slots, :keys, :vals, :maxprobe, :age, :idxfloor, :ndel)
+                    return "/* dict internal: $(field_arg.value) */ undefined"
+                end
             end
         end
 
@@ -664,6 +688,11 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         return "$(obj).$(field_name) = $(val)"
     end
 
+    # Handle Core.memorynew — internal memory allocation, no-op in JS
+    if callee isa GlobalRef && callee.mod === Core && callee.name === :memorynew
+        return "undefined /* memorynew */"
+    end
+
     # Handle Core.tuple
     if callee isa GlobalRef && callee.mod === Core && callee.name === :tuple
         vals = [compile_value(ctx, a) for a in args[2:end]]
@@ -732,6 +761,37 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
         return "$(s_val).repeat($(n_val))"
     end
 
+    # Dict operations: setindex!, getindex, delete!, get, haskey
+    sig_params = mi.specTypes.parameters
+    if length(sig_params) >= 2
+        first_arg_type = sig_params[2]
+        if first_arg_type isa DataType && first_arg_type <: AbstractDict
+            if func_name == "setindex!"
+                # setindex!(d, val, key) → d.set(key, val)
+                d_val = compile_value(ctx, expr.args[3])
+                val_val = compile_value(ctx, expr.args[4])
+                key_val = compile_value(ctx, expr.args[5])
+                return "$(d_val).set($(key_val), $(val_val))"
+            elseif func_name == "getindex"
+                # getindex(d, key) → d.get(key)
+                d_val = compile_value(ctx, expr.args[3])
+                key_val = compile_value(ctx, expr.args[4])
+                return "$(d_val).get($(key_val))"
+            elseif func_name == "delete!"
+                # delete!(d, key) → d.delete(key)
+                d_val = compile_value(ctx, expr.args[3])
+                key_val = compile_value(ctx, expr.args[4])
+                return "$(d_val).delete($(key_val))"
+            elseif func_name == "get"
+                # get(d, key, default) → (d.has(key) ? d.get(key) : default)
+                d_val = compile_value(ctx, expr.args[3])
+                key_val = compile_value(ctx, expr.args[4])
+                def_val = compile_value(ctx, expr.args[5])
+                return "($(d_val).has($(key_val)) ? $(d_val).get($(key_val)) : $(def_val))"
+            end
+        end
+    end
+
     return "$(func_name)($(join(call_args, ", ")))"
 end
 
@@ -756,6 +816,10 @@ function compile_new_expr(ctx::JSCompilationContext, expr::Expr)
 
     if T isa DataType && T <: Function
         return compile_closure_creation(ctx, T, field_args)
+    elseif T isa DataType && T <: AbstractDict
+        return "new Map()"
+    elseif T isa DataType && T <: AbstractSet
+        return "new Set()"
     elseif T isa DataType
         # Struct construction: register the type and emit new
         push!(ctx.struct_types, T)
