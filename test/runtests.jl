@@ -3187,4 +3187,194 @@ process.stdout.write(String(f_isempty("hello")));
             @test isdefined(JavaScriptTarget, :build_playground)
         end
     end
+
+    # ==============================================================
+    # PG-007: Playground regression suite (50+ programs)
+    # ==============================================================
+
+    @testset "PG-007: Playground regression suite" begin
+        codegen_path = joinpath(@__DIR__, "..", "src", "playground", "codegen.js")
+
+        # Helper: run Julia source through the full JS pipeline (parse→lower→infer→codegen→eval)
+        function pg_eval(julia_source::String)
+            escaped = replace(julia_source, "\\" => "\\\\", "'" => "\\'", "\n" => "\\n")
+            js_code = """
+            const codegen = require('$(replace(codegen_path, "\\" => "\\\\"))');
+            var result = codegen.compile('$(escaped)');
+            var output = '';
+            var origLog = console.log;
+            console.log = function() {
+                var a = [];
+                for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i]));
+                output += a.join('') + '\\n';
+            };
+            try { eval(result.js); } catch(e) { output += 'ERROR: ' + e.message + '\\n'; }
+            console.log = origLog;
+            process.stdout.write(output.trim());
+            """
+            return run_js(js_code)
+        end
+
+        # ---- Category 1: Integer arithmetic (6 tests) ----
+        @testset "Int arithmetic" begin
+            @test pg_eval("println(2 + 3)") == "5"
+            @test pg_eval("println(100 - 37)") == "63"
+            @test pg_eval("println(7 * 8)") == "56"
+            @test pg_eval("println(2 ^ 16)") == "65536"
+            @test pg_eval("println(-42)") == "-42"
+            @test pg_eval("println(17 % 5)") == "2"
+        end
+
+        # ---- Category 2: Float arithmetic (5 tests) ----
+        @testset "Float arithmetic" begin
+            @test pg_eval("println(1.5 + 2.5)") == "4"
+            @test pg_eval("println(3.14 * 2.0)") == "6.28"
+            @test pg_eval("println(1.0 / 3.0)") == "0.3333333333333333"
+            @test pg_eval("println(2.0 ^ 10.0)") == "1024"
+            @test pg_eval("println(-3.5)") == "-3.5"
+        end
+
+        # ---- Category 3: Math functions (6 tests) ----
+        @testset "Math functions" begin
+            @test pg_eval("println(sqrt(144.0))") == "12"
+            @test pg_eval("println(abs(-7))") == "7"
+            @test pg_eval("println(min(3, 5))") == "3"
+            @test pg_eval("println(max(3, 5))") == "5"
+            @test pg_eval("println(floor(4.9))") == "4"
+            @test pg_eval("println(ceil(4.1))") == "5"
+        end
+
+        # ---- Category 4: Comparisons & logic (5 tests) ----
+        @testset "Comparisons and logic" begin
+            @test pg_eval("println(10 > 5)") == "true"
+            @test pg_eval("println(10 < 5)") == "false"
+            @test pg_eval("println(3 == 3)") == "true"
+            @test pg_eval("println(3 != 3)") == "false"
+            @test pg_eval("println(!false)") == "true"
+        end
+
+        # ---- Category 5: String operations (8 tests) ----
+        @testset "String operations" begin
+            @test pg_eval("println(string(\"hello\", \" world\"))") == "hello world"
+            @test pg_eval("println(uppercase(\"abc\"))") == "ABC"
+            @test pg_eval("println(lowercase(\"XYZ\"))") == "xyz"
+            @test pg_eval("println(length(\"julia\"))") == "5"
+            @test pg_eval("println(startswith(\"foobar\", \"foo\"))") == "true"
+            @test pg_eval("println(endswith(\"foobar\", \"bar\"))") == "true"
+            @test pg_eval("println(strip(\"   spaces   \"))") == "spaces"
+            @test pg_eval("println(string(\"x=\", 42))") == "x=42"
+        end
+
+        # ---- Category 6: Functions & recursion (6 tests) ----
+        @testset "Functions and recursion" begin
+            @test pg_eval("function square(x)\n  return x * x\nend\nprintln(square(9))") == "81"
+            @test pg_eval("function add3(a, b, c)\n  return a + b + c\nend\nprintln(add3(1, 2, 3))") == "6"
+            @test pg_eval("function factorial(n)\n  if n <= 1\n    return 1\n  end\n  return n * factorial(n - 1)\nend\nprintln(factorial(6))") == "720"
+            @test pg_eval("function fib(n)\n  if n <= 1\n    return n\n  end\n  return fib(n - 1) + fib(n - 2)\nend\nprintln(fib(8))") == "21"
+            @test pg_eval("function double(x)\n  return x * 2\nend\nfunction quadruple(x)\n  return double(double(x))\nend\nprintln(quadruple(5))") == "20"
+            @test pg_eval("function identity(x)\n  return x\nend\nprintln(identity(99))") == "99"
+        end
+
+        # ---- Category 7: If/elseif/else (5 tests) ----
+        @testset "If/elseif/else" begin
+            @test pg_eval("function myabs(x)\n  if x >= 0\n    return x\n  else\n    return -x\n  end\nend\nprintln(myabs(-10))") == "10"
+            @test pg_eval("function sign_of(x)\n  if x > 0\n    return 1\n  elseif x < 0\n    return -1\n  else\n    return 0\n  end\nend\nprintln(sign_of(-5))\nprintln(sign_of(0))\nprintln(sign_of(3))") == "-1\n0\n1"
+            @test pg_eval("function clamp01(x)\n  if x < 0\n    return 0\n  elseif x > 1\n    return 1\n  else\n    return x\n  end\nend\nprintln(clamp01(-5))\nprintln(clamp01(2))\nprintln(clamp01(0.5))") == "0\n1\n0.5"
+            @test pg_eval("function even_odd(x)\n  if x > 2 * (x / 2 |> floor)\n    return \"odd\"\n  else\n    return \"even\"\n  end\nend\nprintln(even_odd(3))\nprintln(even_odd(4))") == "odd\neven"
+            @test pg_eval("function letter_grade(score)\n  if score >= 90\n    return \"A\"\n  elseif score >= 80\n    return \"B\"\n  elseif score >= 70\n    return \"C\"\n  elseif score >= 60\n    return \"D\"\n  else\n    return \"F\"\n  end\nend\nprintln(letter_grade(92))\nprintln(letter_grade(73))\nprintln(letter_grade(55))") == "A\nC\nF"
+        end
+
+        # ---- Category 8: While loops (5 tests) ----
+        @testset "While loops" begin
+            @test pg_eval("function countdown(n)\n  while n > 0\n    println(n)\n    n = n - 1\n  end\nend\ncountdown(3)") == "3\n2\n1"
+            @test pg_eval("function sumto(n)\n  s = 0\n  i = 1\n  while i <= n\n    s = s + i\n    i = i + 1\n  end\n  return s\nend\nprintln(sumto(100))") == "5050"
+            @test pg_eval("function power(base, exp)\n  result = 1\n  i = 0\n  while i < exp\n    result = result * base\n    i = i + 1\n  end\n  return result\nend\nprintln(power(2, 10))") == "1024"
+            @test pg_eval("function digits(n)\n  count = 0\n  while n > 0\n    n = n / 10 |> floor\n    count = count + 1\n  end\n  return count\nend\nprintln(digits(12345))") == "5"
+            @test pg_eval("function gcd(a, b)\n  while b != 0\n    t = b\n    b = a - (a / b |> floor) * b\n    a = t\n  end\n  return a\nend\nprintln(gcd(56, 98))") == "14"
+        end
+
+        # ---- Category 9: For loops (5 tests) ----
+        @testset "For loops" begin
+            @test pg_eval("function sum_range(n)\n  s = 0\n  for i in 1:n\n    s = s + i\n  end\n  return s\nend\nprintln(sum_range(10))") == "55"
+            @test pg_eval("function sum_squares(n)\n  s = 0\n  for i in 1:n\n    s = s + i * i\n  end\n  return s\nend\nprintln(sum_squares(5))") == "55"
+            @test pg_eval("function count_down(n)\n  for i in 1:n\n    println(n - i + 1)\n  end\nend\ncount_down(3)") == "3\n2\n1"
+            @test pg_eval("function triangular(n)\n  t = 0\n  for i in 1:n\n    t = t + i\n  end\n  return t\nend\nprintln(triangular(7))") == "28"
+            @test pg_eval("function product(n)\n  p = 1\n  for i in 1:n\n    p = p * i\n  end\n  return p\nend\nprintln(product(5))") == "120"
+        end
+
+        # ---- Category 10: Nested control flow (4 tests) ----
+        @testset "Nested control flow" begin
+            @test pg_eval("function nested_sum(n)\n  total = 0\n  for i in 1:n\n    for j in 1:i\n      total = total + 1\n    end\n  end\n  return total\nend\nprintln(nested_sum(4))") == "10"
+            @test pg_eval("function fizzbuzz_count(n)\n  c = 0\n  for i in 1:n\n    if i > 3 * (i / 3 |> floor)\n      c = c + 1\n    end\n  end\n  return c\nend\nprintln(fizzbuzz_count(10))") == "7"
+            @test pg_eval("function prime_check(n)\n  if n < 2\n    return false\n  end\n  i = 2\n  while i * i <= n\n    if n - (n / i |> floor) * i == 0\n      return false\n    end\n    i = i + 1\n  end\n  return true\nend\nprintln(prime_check(7))\nprintln(prime_check(4))\nprintln(prime_check(13))") == "true\nfalse\ntrue"
+            @test pg_eval("function collatz_steps(n)\n  steps = 0\n  while n != 1\n    if n > 2 * (n / 2 |> floor)\n      n = 3 * n + 1\n    else\n      n = n / 2\n    end\n    steps = steps + 1\n  end\n  return steps\nend\nprintln(collatz_steps(27))") == "111"
+        end
+
+        # ---- Category 11: Structs (6 tests) ----
+        @testset "Structs" begin
+            @test pg_eval("struct Point\n  x\n  y\nend\np = Point(3.0, 4.0)\nprintln(p.x)\nprintln(p.y)") == "3\n4"
+            @test pg_eval("struct Vec2\n  x\n  y\nend\nfunction dot(a, b)\n  return a.x * b.x + a.y * b.y\nend\nprintln(dot(Vec2(1.0, 2.0), Vec2(3.0, 4.0)))") == "11"
+            @test pg_eval("struct Point\n  x\n  y\nend\nfunction distance(p)\n  return sqrt(p.x * p.x + p.y * p.y)\nend\nprintln(distance(Point(3.0, 4.0)))") == "5"
+            @test pg_eval("struct RGB\n  r\n  g\n  b\nend\nfunction brightness(c)\n  return (c.r + c.g + c.b) / 3.0\nend\nprintln(brightness(RGB(255.0, 128.0, 0.0)))") == "127.66666666666667"
+            @test pg_eval("struct Counter\n  value\nend\nfunction increment(c)\n  return Counter(c.value + 1)\nend\nc = Counter(0)\nc = increment(c)\nc = increment(c)\nc = increment(c)\nprintln(c.value)") == "3"
+            @test pg_eval("struct Rect\n  w\n  h\nend\nfunction area(r)\n  return r.w * r.h\nend\nfunction perimeter(r)\n  return 2 * (r.w + r.h)\nend\nr = Rect(5.0, 3.0)\nprintln(area(r))\nprintln(perimeter(r))") == "15\n16"
+        end
+
+        # ---- Category 12: Arrays (5 tests) ----
+        @testset "Arrays" begin
+            @test pg_eval("a = [1, 2, 3, 4, 5]\nprintln(a[1])\nprintln(a[5])") == "1\n5"
+            @test pg_eval("a = [10, 20, 30]\nprintln(length(a))") == "3"
+            @test pg_eval("a = [1, 2, 3]\nprintln(a[1] + a[2] + a[3])") == "6"
+            @test pg_eval("a = [100, 200, 300, 400]\nprintln(a[2])\nprintln(a[4])") == "200\n400"
+            @test pg_eval("a = [5, 10, 15]\nfunction sum_arr(arr)\n  s = 0\n  for i in 1:length(arr)\n    s = s + arr[i]\n  end\n  return s\nend\nprintln(sum_arr(a))") == "30"
+        end
+
+        # ---- Category 13: Try/catch (4 tests) ----
+        @testset "Try/catch" begin
+            @test pg_eval("function safe(x)\n  try\n    return 100 / x\n  catch e\n    return -1\n  end\nend\nprintln(safe(4))") == "25"
+            @test pg_eval("function guarded()\n  try\n    error(\"oops\")\n    return 1\n  catch e\n    return 2\n  end\nend\nprintln(guarded())") == "2"
+            @test pg_eval("function default_val(x)\n  try\n    if x < 0\n      error(\"negative\")\n    end\n    return x * 2\n  catch e\n    return 0\n  end\nend\nprintln(default_val(5))\nprintln(default_val(-1))") == "10\n0"
+            @test pg_eval("function safe_sqrt(x)\n  try\n    if x < 0.0\n      error(\"domain\")\n    end\n    return sqrt(x)\n  catch e\n    return -1.0\n  end\nend\nprintln(safe_sqrt(16.0))") == "4"
+        end
+
+        # ---- Category 14: Boolean & Nothing (4 tests) ----
+        @testset "Bool and Nothing" begin
+            @test pg_eval("println(true)\nprintln(false)") == "true\nfalse"
+            @test pg_eval("println(nothing)") == "nothing"
+            @test pg_eval("function check(x)\n  if x > 0\n    return true\n  else\n    return false\n  end\nend\nprintln(check(5))\nprintln(check(-1))") == "true\nfalse"
+            @test pg_eval("function noop()\n  return nothing\nend\nprintln(noop())") == "nothing"
+        end
+
+        # ---- Category 15: Pipe operator (2 tests) ----
+        @testset "Pipe operator" begin
+            @test pg_eval("function triple(x)\n  return x * 3\nend\nprintln(7 |> triple)") == "21"
+            @test pg_eval("function inc(x)\n  return x + 1\nend\nfunction double(x)\n  return x * 2\nend\nprintln(3 |> inc |> double)") == "8"
+        end
+
+        # ---- Category 16: Multiple functions / cross-calls (3 tests) ----
+        @testset "Cross-function calls" begin
+            @test pg_eval("function helper(x)\n  return x + 10\nend\nfunction main_fn(x)\n  return helper(helper(x))\nend\nprintln(main_fn(5))") == "25"
+            @test pg_eval("function is_even(n)\n  return n - 2 * (n / 2 |> floor) == 0\nend\nfunction count_even(n)\n  c = 0\n  for i in 1:n\n    if is_even(i)\n      c = c + 1\n    end\n  end\n  return c\nend\nprintln(count_even(10))") == "5"
+            @test pg_eval("function square(x)\n  return x * x\nend\nfunction sum_of_squares(n)\n  s = 0\n  for i in 1:n\n    s = s + square(i)\n  end\n  return s\nend\nprintln(sum_of_squares(5))") == "55"
+        end
+
+        # ---- Category 17: Classic algorithms (4 tests) ----
+        @testset "Classic algorithms" begin
+            # Fibonacci iterative
+            @test pg_eval("function fib_iter(n)\n  a = 0\n  b = 1\n  i = 0\n  while i < n\n    c = a + b\n    a = b\n    b = c\n    i = i + 1\n  end\n  return a\nend\nprintln(fib_iter(10))") == "55"
+            # Power via repeated squaring (iterative)
+            @test pg_eval("function fast_pow(base, exp)\n  result = 1.0\n  b = base\n  e = exp\n  while e > 0\n    if e > 2 * (e / 2 |> floor)\n      result = result * b\n    end\n    b = b * b\n    e = e / 2 |> floor\n  end\n  return result\nend\nprintln(fast_pow(2.0, 10))") == "1024"
+            # Integer square root (Newton's method)
+            @test pg_eval("function isqrt(n)\n  x = n\n  while x * x > n\n    x = (x + n / x |> floor) / 2 |> floor\n  end\n  return x\nend\nprintln(isqrt(100))\nprintln(isqrt(50))") == "10\n7"
+            # Sum of digits
+            @test pg_eval("function digit_sum(n)\n  s = 0\n  while n > 0\n    s = s + n - (n / 10 |> floor) * 10\n    n = n / 10 |> floor\n  end\n  return s\nend\nprintln(digit_sum(12345))") == "15"
+        end
+
+        # ---- Category 18: String + numeric mixed (3 tests) ----
+        @testset "String and numeric mixed" begin
+            @test pg_eval("function describe(n)\n  if n > 0\n    return string(n, \" is positive\")\n  else\n    return string(n, \" is non-positive\")\n  end\nend\nprintln(describe(5))\nprintln(describe(-3))") == "5 is positive\n-3 is non-positive"
+            @test pg_eval("println(repeat(\"ab\", 3))") == "ababab"
+            @test pg_eval("println(string(1, \"+\", 2, \"=\", 3))") == "1+2=3"
+        end
+    end
 end
