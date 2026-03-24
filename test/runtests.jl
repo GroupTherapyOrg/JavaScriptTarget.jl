@@ -631,4 +631,57 @@ process.stdout.write(animal_speak(new TestCat("Whiskers")));
         @test occursin("class TestDog", result3.js)
         @test occursin("class TestCat", result3.js)
     end
+
+    @testset "CO-002: For loops and iteration" begin
+        # Range for loop: sum 1 to n
+        function f_sum_range(n::Int32)::Int32
+            s = Int32(0)
+            for i in Int32(1):n
+                s += i
+            end
+            return s
+        end
+        @test compile_and_run(f_sum_range, (Int32,), Int32(10)) == "55"
+        @test compile_and_run(f_sum_range, (Int32,), Int32(0)) == "0"
+        @test compile_and_run(f_sum_range, (Int32,), Int32(1)) == "1"
+
+        # Array for loop: sum elements
+        function f_sum_arr(v::Vector{Int32})::Int32
+            s = Int32(0)
+            for x in v
+                s += x
+            end
+            return s
+        end
+        result = compile(f_sum_arr, (Vector{Int32},); module_format=:none)
+        js1 = """
+$(result.js)
+process.stdout.write(String(f_sum_arr([1, 2, 3, 4, 5])));
+"""
+        @test run_js(js1) == "15"
+
+        # Empty array
+        js2 = """
+$(result.js)
+process.stdout.write(String(f_sum_arr([])));
+"""
+        @test run_js(js2) == "0"
+
+        # Single element array
+        js3 = """
+$(result.js)
+process.stdout.write(String(f_sum_arr([42])));
+"""
+        @test run_js(js3) == "42"
+
+        # Range with computation in body
+        function f_sum_squares(n::Int32)::Int32
+            s = Int32(0)
+            for i in Int32(1):n
+                s += i * i
+            end
+            return s
+        end
+        @test compile_and_run(f_sum_squares, (Int32,), Int32(5)) == "55"
+    end
 end

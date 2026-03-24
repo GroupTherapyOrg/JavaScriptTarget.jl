@@ -100,6 +100,40 @@ function references_ssa(stmt, ssa_id::Int)
 end
 
 """
+Emit phi assignments for merge phis at merge_point within a branch.
+Assigns values for edges in [edge_lo, edge_hi].
+Returns the number of consecutive phi nodes consumed.
+"""
+function emit_merge_phi_assignments!(ctx, buf, code, phi_info, merge_point, end_idx, edge_lo, edge_hi, indent)
+    count = 0
+    mp = merge_point
+    while mp <= end_idx && code[mp] isa Core.PhiNode && haskey(phi_info, mp)
+        phi = phi_info[mp]
+        var_name = ctx.js_locals[mp]
+        for (k, edge) in enumerate(phi.edges)
+            if isassigned(phi.values, k) && edge >= edge_lo && edge <= edge_hi
+                val = compile_value(ctx, phi.values[k])
+                print(buf, "$(indent)$(var_name) = $(val);\n")
+            end
+        end
+        count += 1
+        mp += 1
+    end
+    return count
+end
+
+"""
+Count consecutive phi nodes starting at idx.
+"""
+function count_merge_phis(code, phi_info, idx, end_idx)
+    count = 0
+    while idx + count <= end_idx && code[idx + count] isa Core.PhiNode && haskey(phi_info, idx + count)
+        count += 1
+    end
+    return count
+end
+
+"""
 Emit structured JS code for a range of IR statements.
 Uses pattern matching to detect if/else and while loop structures.
 """
@@ -194,19 +228,39 @@ function emit_structured!(ctx, buf, code, start_idx, end_idx, loop_headers, back
 
             if has_else
                 # if/else: true branch = i+1..target-2, false branch = target..merge-1
+                n_merge_phis = count_merge_phis(code, phi_info, merge_point, end_idx)
+                inner_indent = "  " ^ (depth + 1)
                 print(buf, "$(indent)if ($(cond)) {\n")
                 emit_structured!(ctx, buf, code, i + 1, target - 2, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+                if n_merge_phis > 0
+                    emit_merge_phi_assignments!(ctx, buf, code, phi_info, merge_point, end_idx, i + 1, target - 1, inner_indent)
+                end
                 print(buf, "$(indent)} else {\n")
                 emit_structured!(ctx, buf, code, target, merge_point - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+                if n_merge_phis > 0
+                    emit_merge_phi_assignments!(ctx, buf, code, phi_info, merge_point, end_idx, target, merge_point - 1, inner_indent)
+                end
                 print(buf, "$(indent)}\n")
-                i = merge_point
+                i = merge_point + n_merge_phis
             else
                 # if-then: GotoIfNot(cond, target) means if cond is true, fall through (i+1..target-1)
-                # then continue at target
-                print(buf, "$(indent)if ($(cond)) {\n")
-                emit_structured!(ctx, buf, code, i + 1, target - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
-                print(buf, "$(indent)}\n")
-                i = target
+                # Check for merge phis at target
+                n_merge_phis = count_merge_phis(code, phi_info, target, end_idx)
+                if n_merge_phis > 0
+                    inner_indent = "  " ^ (depth + 1)
+                    print(buf, "$(indent)if ($(cond)) {\n")
+                    emit_structured!(ctx, buf, code, i + 1, target - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+                    emit_merge_phi_assignments!(ctx, buf, code, phi_info, target, end_idx, i + 1, target - 1, inner_indent)
+                    print(buf, "$(indent)} else {\n")
+                    emit_merge_phi_assignments!(ctx, buf, code, phi_info, target, end_idx, i, i, inner_indent)
+                    print(buf, "$(indent)}\n")
+                    i = target + n_merge_phis
+                else
+                    print(buf, "$(indent)if ($(cond)) {\n")
+                    emit_structured!(ctx, buf, code, i + 1, target - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1)
+                    print(buf, "$(indent)}\n")
+                    i = target
+                end
             end
             continue
         end
@@ -256,44 +310,34 @@ function emit_loop_body!(ctx, buf, code, start_idx, end_idx, loop_headers, backw
                 end
 
                 if has_else
+                    # Check for merge phis at merge_point
+                    n_merge_phis = count_merge_phis(code, phi_info, merge_point, end_idx)
+                    inner_indent = "  " ^ (depth + 1)
                     print(buf, "$(indent)if ($(cond)) {\n")
                     emit_loop_body!(ctx, buf, code, i + 1, target - 2, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, loop_header)
+                    if n_merge_phis > 0
+                        emit_merge_phi_assignments!(ctx, buf, code, phi_info, merge_point, end_idx, i + 1, target - 1, inner_indent)
+                    end
                     print(buf, "$(indent)} else {\n")
                     emit_loop_body!(ctx, buf, code, target, merge_point - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, loop_header)
+                    if n_merge_phis > 0
+                        emit_merge_phi_assignments!(ctx, buf, code, phi_info, merge_point, end_idx, target, merge_point - 1, inner_indent)
+                    end
                     print(buf, "$(indent)}\n")
-                    i = merge_point
+                    i = merge_point + n_merge_phis
                 else
                     # if-then: true branch = i+1..target-1, continue at target
-                    # Check if target is a PhiNode (merge point) — emit as if/else with phi assignment
-                    if target <= length(code) && code[target] isa Core.PhiNode && haskey(phi_info, target)
-                        phi = phi_info[target]
-                        var_name = ctx.js_locals[target]
-                        # Find the phi values for each branch
-                        then_val = nothing
-                        else_val = nothing
-                        for (k, edge) in enumerate(phi.edges)
-                            if isassigned(phi.values, k)
-                                if edge >= i + 1 && edge < target  # from then branch
-                                    then_val = compile_value(ctx, phi.values[k])
-                                elseif edge == i || edge < i + 1  # from the GotoIfNot (skip branch)
-                                    else_val = compile_value(ctx, phi.values[k])
-                                end
-                            end
-                        end
-
-                        # Emit as if/else to properly assign phi
-                        print(buf, "$(indent)if ($(cond)) {\n")
+                    # Check if target has merge phis
+                    n_merge_phis = count_merge_phis(code, phi_info, target, end_idx)
+                    if n_merge_phis > 0
                         inner_indent = "  " ^ (depth + 1)
+                        print(buf, "$(indent)if ($(cond)) {\n")
                         emit_loop_body!(ctx, buf, code, i + 1, target - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, loop_header)
-                        if then_val !== nothing
-                            print(buf, "$(inner_indent)$(var_name) = $(then_val);\n")
-                        end
+                        emit_merge_phi_assignments!(ctx, buf, code, phi_info, target, end_idx, i + 1, target - 1, inner_indent)
                         print(buf, "$(indent)} else {\n")
-                        if else_val !== nothing
-                            print(buf, "$(inner_indent)$(var_name) = $(else_val);\n")
-                        end
+                        emit_merge_phi_assignments!(ctx, buf, code, phi_info, target, end_idx, i, i, inner_indent)
                         print(buf, "$(indent)}\n")
-                        i = target + 1  # Skip the phi node
+                        i = target + n_merge_phis
                     else
                         print(buf, "$(indent)if ($(cond)) {\n")
                         emit_loop_body!(ctx, buf, code, i + 1, target - 1, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, loop_header)
@@ -980,6 +1024,11 @@ function compile_intrinsic(ctx::JSCompilationContext, name::Symbol, args::Abstra
     elseif name === :ashr_int
         return "($(compiled_args[1]) >> $(compiled_args[2]))"
     elseif name === :not_int
+        # Bool: use logical NOT; integers: use bitwise NOT
+        arg_type = _get_ssa_type(ctx, args[1])
+        if arg_type === Bool
+            return "!($(compiled_args[1]))"
+        end
         return "(~$(compiled_args[1]))"
     elseif name === :abs_float
         return "Math.abs($(compiled_args[1]))"
