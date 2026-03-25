@@ -47,7 +47,16 @@ function compile_function(ctx::JSCompilationContext)
 
     # === Pass 3: Pre-allocate locals for SSA values used across blocks ===
     # Any SSA value referenced from a different block needs a local
+    # Skip globals, constants, slot reads — these always inline
     for (i, stmt) in enumerate(code)
+        # Skip statements that should always inline (not get a local)
+        if stmt isa GlobalRef || stmt isa Core.SlotNumber
+            continue
+        end
+        # Skip slot assignments (the slot variable IS the local)
+        if stmt isa Expr && stmt.head === :(=)
+            continue
+        end
         if stmt isa Expr && stmt.head in (:call, :invoke, :new)
             # Check if this value is used anywhere
             for (j, other) in enumerate(code)
