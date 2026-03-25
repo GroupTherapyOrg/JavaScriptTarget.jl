@@ -1008,10 +1008,14 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         return ""
     end
 
-    # NamedTuple constructor: (%apply_type_result)(%tuple) — skip if result is NamedTuple
+    # NamedTuple constructor: (%apply_type_result)(%tuple) — skip, consumed by kwcall
     if callee isa Core.SSAValue
-        ct = ctx.code_info.ssavaluetypes[callee.id]
+        ct = try ctx.code_info.ssavaluetypes[callee.id] catch; nothing end
         if ct isa Core.Const && ct.val isa Type && ct.val <: NamedTuple
+            return ""
+        end
+        # Also catch the case where callee type is the NamedTuple type itself
+        if ct isa DataType && ct <: NamedTuple
             return ""
         end
     end
