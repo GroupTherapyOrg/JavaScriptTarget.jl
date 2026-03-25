@@ -2764,6 +2764,8 @@ process.stdout.write(String(f_isempty("hello")));
         @testset "String interpolation" begin
             @test playground_eval("x = 42\nprintln(string(\"x = \", x))") == "x = 42"
             @test playground_eval("println(string(\"a\", \"b\", \"c\"))") == "abc"
+            # Dollar-sign interpolation syntax (the actual bug that was fixed)
+            @test playground_eval("name = \"World\"\nx = 42\nprintln(\"Hello, \$name! The answer is \$x.\")") == "Hello, World! The answer is 42."
         end
 
         @testset "Math functions" begin
