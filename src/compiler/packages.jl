@@ -21,21 +21,8 @@ const PACKAGE_COMPILATIONS = Dict{Tuple{Module, Symbol}, Function}()
 
 Register a JS compilation mapping for a Julia package function.
 
-The `compiler_fn` receives:
-- `ctx::JSCompilationContext` — compilation context
-- `kwargs::Dict{Symbol, String}` — keyword arguments (name → compiled JS expression)
-- `pos_args::Vector{String}` — positional arguments (compiled JS expressions)
-
-And should return a JS code string.
-
-# Example
-```julia
-register_package_compilation!(MyPlotLib, :scatter) do ctx, kwargs, pos_args
-    pairs = ["\\"\\$(k)\\": \\$(v)" for (k, v) in kwargs]
-    push!(pairs, "\\"type\\": \\"scatter\\"")
-    return "{\\$(join(pairs, ", "))}"
-end
-```
+The compiler_fn receives (ctx, kwargs::Dict{Symbol,String}, pos_args::Vector{String})
+and should return a JS code string.
 """
 function register_package_compilation!(compiler_fn::Function, mod::Module, name::Symbol)
     PACKAGE_COMPILATIONS[(mod, name)] = compiler_fn
