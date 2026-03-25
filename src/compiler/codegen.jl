@@ -70,6 +70,27 @@ function compile_function(ctx::JSCompilationContext)
         print(buf, "  let $(ctx.js_locals[idx]);\n")
     end
 
+    # Declare slot variables (used in optimize=false IR for local variables)
+    if hasproperty(ctx.code_info, :slotnames) && ctx.code_info.slotnames !== nothing
+        slot_declared = Set{String}()
+        for i in 2:length(ctx.code_info.slotnames)  # Skip slot 1 (#self#)
+            name = string(ctx.code_info.slotnames[i])
+            if startswith(name, "#") || startswith(name, "@") || isempty(name)
+                name = "_tmp$(i)"
+            end
+            # Skip argument names (already declared as parameters)
+            if name in ctx.arg_names || name in slot_declared
+                continue
+            end
+            # Only declare slots that are actually assigned in the code
+            is_assigned = any(s -> s isa Expr && s.head == :(=) && s.args[1] isa Core.SlotNumber && s.args[1].id == i, ctx.code_info.code)
+            if is_assigned
+                push!(slot_declared, name)
+                print(buf, "  let $(name);\n")
+            end
+        end
+    end
+
     # Emit the code body
     emit_structured!(ctx, buf, code, 1, n, loop_headers, backward_edges, forward_gotos, phi_info, 1)
 
@@ -479,6 +500,26 @@ function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
         end
     elseif expr.head === :leave || expr.head === :pop_exception
         # Exception frame management: no-op in JS (try/catch handles this)
+    elseif expr.head === :(=)
+        # Slot assignment (optimize=false IR): _var = expr
+        lhs = expr.args[1]
+        rhs = expr.args[2]
+        lhs_name = compile_value(ctx, lhs)
+        # RHS may be an Expr (call, invoke, etc.) or a plain value
+        rhs_val = if rhs isa Expr
+            if rhs.head === :call
+                compile_call(ctx, rhs)
+            elseif rhs.head === :invoke
+                compile_invoke(ctx, rhs)
+            elseif rhs.head === :new
+                compile_new_expr(ctx, rhs)
+            else
+                compile_value(ctx, rhs)
+            end
+        else
+            compile_value(ctx, rhs)
+        end
+        print(buf, "$(indent)$(lhs_name) = $(rhs_val);\n")
     end
 end
 
@@ -488,6 +529,148 @@ Compile a :call expression (intrinsics, builtins, generic calls).
 function compile_call(ctx::JSCompilationContext, expr::Expr)
     args = expr.args
     callee = args[1]
+
+    # ─── Resolve SSA callees (from unoptimized IR) ───
+    # In optimize=false IR, calls like push!(x, val) appear as (%20)(%21, %22)
+    # where %20 is an SSA holding Core.Const(push!). Resolve and dispatch.
+    if callee isa Core.SSAValue
+        callee_type = ctx.code_info.ssavaluetypes[callee.id]
+        if callee_type isa Core.Const
+            resolved_fn = callee_type.val
+            fn_name = string(nameof(resolved_fn))
+            call_args = [compile_value(ctx, a) for a in args[2:end]]
+
+            # Array creation: Float64[] → getindex(Float64) → []
+            # Also handles array indexing: arr[i] → arr[i-1]
+            if resolved_fn === Base.getindex
+                # Check if first arg is a Type (array construction)
+                if length(args) >= 2
+                    first_arg = args[2]
+                    first_type = nothing
+                    if first_arg isa Core.SSAValue
+                        first_type = try ctx.code_info.ssavaluetypes[first_arg.id] catch; nothing end
+                    elseif first_arg isa GlobalRef
+                        first_type = try Core.Const(getfield(first_arg.mod, first_arg.name)) catch; nothing end
+                    end
+                    if first_type isa Core.Const && first_type.val isa DataType
+                        return "[]"
+                    end
+                end
+                # Array indexing: arr[i] → arr[i-1]
+                if length(call_args) == 2
+                    return "$(call_args[1])[($(call_args[2])) - 1]"
+                end
+                return "[]"
+            end
+
+            # push!(arr, val) → arr.push(val)
+            if resolved_fn === Base.push! && length(call_args) >= 2
+                return "$(call_args[1]).push($(call_args[2]))"
+            end
+
+            # length(arr) → arr.length
+            if resolved_fn === Base.length && length(call_args) >= 1
+                return "$(call_args[1]).length"
+            end
+
+            # Math functions
+            if resolved_fn === Base.sin || resolved_fn === sin
+                return "Math.sin($(call_args[1]))"
+            end
+            if resolved_fn === Base.cos || resolved_fn === cos
+                return "Math.cos($(call_args[1]))"
+            end
+            if resolved_fn === Base.sqrt || resolved_fn === sqrt
+                return "Math.sqrt($(call_args[1]))"
+            end
+            if resolved_fn === Base.abs || resolved_fn === abs
+                return "Math.abs($(call_args[1]))"
+            end
+            if resolved_fn === Base.max || resolved_fn === max
+                return "Math.max($(join(call_args, ", ")))"
+            end
+            if resolved_fn === Base.min || resolved_fn === min
+                return "Math.min($(join(call_args, ", ")))"
+            end
+
+            # println → console.log
+            if resolved_fn === Base.println || resolved_fn === println
+                require_runtime!(ctx, :jl_println)
+                return "jl_println($(join(call_args, ", ")))"
+            end
+
+            # Type constructors: Float64(x) → +(x) (identity for numbers)
+            if resolved_fn === Float64
+                return "+($(call_args[1]))"
+            end
+            if resolved_fn === Float32
+                return "Math.fround($(call_args[1]))"
+            end
+            if resolved_fn === Int || resolved_fn === Int64
+                return "(($(call_args[1])) | 0)"
+            end
+
+            # Colon constructor: (:)(start, stop) → range not needed, handled by iterate
+            if resolved_fn === Base.Colon()
+                # Range creation — this is just (:)(1, n), handled by iterate below
+                return "({start: $(call_args[1]), stop: $(call_args[2])})"
+            end
+
+            # iterate(range) and iterate(range, state) for for-loops
+            if resolved_fn === Base.iterate
+                if length(call_args) == 1
+                    # iterate(range) → { value: range.start, done: range.start > range.stop }
+                    r = call_args[1]
+                    return "($(r).start <= $(r).stop ? [$(r).start, $(r).start] : null)"
+                else
+                    # iterate(range, state) → { value: state+1, done: state+1 > range.stop }
+                    r = call_args[1]
+                    s = call_args[2]
+                    return "(($(s) + 1) <= $(r).stop ? [($(s) + 1), ($(s) + 1)] : null)"
+                end
+            end
+
+            # Multiplication, addition etc (when not inlined as intrinsics)
+            if resolved_fn === Base.:(*) && length(call_args) == 2
+                return "($(call_args[1]) * $(call_args[2]))"
+            end
+            if resolved_fn === Base.:(+) && length(call_args) == 2
+                return "($(call_args[1]) + $(call_args[2]))"
+            end
+            if resolved_fn === Base.:(-) && length(call_args) == 2
+                return "($(call_args[1]) - $(call_args[2]))"
+            end
+            if resolved_fn === Base.:(-) && length(call_args) == 1
+                return "(-($(call_args[1])))"
+            end
+            if resolved_fn === Base.:(/) && length(call_args) == 2
+                return "($(call_args[1]) / $(call_args[2]))"
+            end
+
+            # js() escape hatch
+            if fn_name == "js"
+                template_str = nothing
+                if length(args) >= 2 && args[2] isa String
+                    template_str = args[2]
+                elseif length(call_args) >= 1
+                    s = call_args[1]
+                    if length(s) >= 2 && s[1] == '"' && s[end] == '"'
+                        template_str = replace(replace(s[2:end-1], "\\\"" => "\""), "\\\\" => "\\")
+                    end
+                end
+                if template_str !== nothing
+                    result = template_str
+                    for i in 2:length(call_args)
+                        result = replace(result, "\$$(i-1)" => call_args[i])
+                    end
+                    return result
+                end
+            end
+
+            # Fallback: emit as function call
+            return "$(fn_name)($(join(call_args, ", ")))"
+        end
+    end
 
     # Check for Core.Intrinsics — may be referenced via Base.add_int etc.
     if callee isa GlobalRef
@@ -539,6 +722,41 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         # Base.string(...) → template literal
         if bname === :string && callee.mod === Base
             return compile_string_concat(ctx, args[2:end])
+        end
+
+        # Base.getindex — array creation (Type[]) or array access (arr[i])
+        if bname === :getindex && callee.mod === Base
+            # Check if first arg is a Type → empty array creation
+            if length(args) >= 2
+                first_arg = args[2]
+                first_type = nothing
+                if first_arg isa Core.SSAValue
+                    first_type = try ctx.code_info.ssavaluetypes[first_arg.id] catch; nothing end
+                elseif first_arg isa GlobalRef
+                    first_type = try Core.Const(getfield(first_arg.mod, first_arg.name)) catch; nothing end
+                end
+                if first_type isa Core.Const && first_type.val isa DataType
+                    return "[]"
+                end
+            end
+            # Array indexing
+            call_args_gr = [compile_value(ctx, a) for a in args[2:end]]
+            if length(call_args_gr) == 2
+                return "$(call_args_gr[1])[($(call_args_gr[2])) - 1]"
+            end
+        end
+
+        # Base.iterate — for-loop iteration
+        if bname === :iterate && callee.mod === Base
+            call_args_it = [compile_value(ctx, a) for a in args[2:end]]
+            if length(call_args_it) == 1
+                r = call_args_it[1]
+                return "($(r).start <= $(r).stop ? [$(r).start, $(r).start] : null)"
+            else
+                r = call_args_it[1]
+                s = call_args_it[2]
+                return "(($(s) + 1) <= $(r).stop ? [($(s) + 1), ($(s) + 1)] : null)"
+            end
         end
     end
 
@@ -1382,6 +1600,12 @@ function compile_value(ctx::JSCompilationContext, val)
         if stmt isa Core.PiNode
             # PiNode is a type narrowing no-op: pass through the value
             return compile_value(ctx, stmt.val)
+        elseif stmt isa Core.SlotNumber
+            # Slot read in unoptimized IR — resolve to slot variable name
+            return compile_value(ctx, stmt)
+        elseif stmt isa GlobalRef
+            # Global reference — resolve directly
+            return compile_value(ctx, stmt)
         elseif stmt isa Expr && stmt.head === :call
             return compile_call(ctx, stmt)
         elseif stmt isa Expr && stmt.head === :invoke
@@ -1390,9 +1614,38 @@ function compile_value(ctx::JSCompilationContext, val)
             return compile_new_expr(ctx, stmt)
         elseif stmt isa Expr && stmt.head === :boundscheck
             return "false"
+        elseif stmt isa Expr && stmt.head === :(=)
+            # Slot assignment — the SSA value is the RHS result
+            rhs = stmt.args[2]
+            if rhs isa Expr
+                if rhs.head === :call
+                    return compile_call(ctx, rhs)
+                elseif rhs.head === :invoke
+                    return compile_invoke(ctx, rhs)
+                end
+            end
+            return compile_value(ctx, rhs)
         end
         # Fallback: create a local
         return get_local!(ctx, id)
+    elseif val isa Core.SlotNumber
+        # Local variable (used in optimize=false IR)
+        slot_id = val.id
+        if slot_id == 1
+            # Slot 1 is #self# (the function)
+            return "null"
+        end
+        # Use slot name from CodeInfo if available
+        slot_names = ctx.code_info.slotnames
+        if slot_id <= length(slot_names)
+            name = string(slot_names[slot_id])
+            # Clean up generated names (remove # prefixes, @ etc.)
+            if startswith(name, "#") || startswith(name, "@") || isempty(name)
+                return "_tmp$(slot_id)"
+            end
+            return name
+        end
+        return "_tmp$(slot_id)"
     elseif val isa Core.Argument
         idx = val.n - 1
         if idx >= 1 && idx <= length(ctx.arg_names)
