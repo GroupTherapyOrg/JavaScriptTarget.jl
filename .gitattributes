@@ -1,0 +1,7 @@
+# Mark playground JS files as generated so GitHub language stats
+# correctly show this as a Julia package, not a JavaScript project.
+# These files ARE source code (hand-written), but they're runtime
+# artifacts for the browser playground, not the package's core logic.
+src/playground/*.js linguist-generated=true
+docs/src/assets/playground/*.js linguist-generated=true
+docs/playground/*.html linguist-generated=true
