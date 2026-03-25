@@ -1053,6 +1053,12 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             return compile_string_concat(ctx, args[2:end])
         end
 
+        # Base.vect — array literal [1, 2, 3]
+        if bname === :vect && callee.mod === Base
+            call_args_v = [compile_value(ctx, a) for a in args[2:end]]
+            return "[$(join(call_args_v, ", "))]"
+        end
+
         # Base.getindex — array creation (Type[]) or array access (arr[i])
         if bname === :getindex && callee.mod === Base
             # Check if first arg is a Type → empty array creation
