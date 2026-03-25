@@ -968,21 +968,32 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
         return "jl_print($(join(call_args, ", ")))"
     end
 
-    # JS escape hatch: js("raw code") → emits string content as raw JavaScript
+    # JS escape hatch: js("raw code") or js("template with \$1", val) → raw JavaScript
     # Used by Therapy.jl to call browser APIs (document, localStorage, etc.)
+    # Supports value passing: js("Plotly.react(el, \$1)", data()) substitutes $1 with compiled JS
     if func_name == "js"
+        # Extract template string from IR (most reliable) or compiled args
+        template_str = nothing
         if length(expr.args) >= 3 && expr.args[3] isa String
-            return expr.args[3]
-        end
-        # Fallback: compiled arg with quotes stripped
-        if length(call_args) >= 1
+            template_str = expr.args[3]
+        elseif length(call_args) >= 1
             s = call_args[1]
             if length(s) >= 2 && s[1] == '"' && s[end] == '"'
-                return replace(replace(s[2:end-1], "\\\"" => "\""), "\\\\" => "\\")
+                template_str = replace(replace(s[2:end-1], "\\\"" => "\""), "\\\\" => "\\")
             end
-            return s
         end
-        return "/* js() called with no arguments */"
+
+        if template_str === nothing
+            return "/* js() called with no string template */"
+        end
+
+        # Substitute $1, $2, etc. with compiled JS expressions for additional args
+        result = template_str
+        for i in 2:length(call_args)
+            result = replace(result, "\$$(i-1)" => call_args[i])
+        end
+
+        return result
     end
 
     # Math: div, fld, mod, cld, rem
