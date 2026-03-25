@@ -822,13 +822,33 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 return ""
             end
 
-            # Check package registry for positional calls
-            if resolved_fn isa Function
+            # Check package registry for positional calls (functions AND type constructors)
+            if resolved_fn isa Function || resolved_fn isa Type
                 fn_mod = parentmodule(resolved_fn)
                 fn_sym = nameof(resolved_fn)
                 compiler_fn = lookup_package_compilation(fn_mod, fn_sym)
                 if compiler_fn !== nothing
                     return compiler_fn(ctx, Dict{Symbol,String}(), call_args)
+                end
+            end
+
+            # Module field access: Base.getproperty(SomeModule, :name) → resolve to function
+            # In unoptimized IR, `PlotlyBase.scatter(...)` becomes getproperty(PlotlyBase, :scatter)
+            # followed by a call. Suppress the getproperty — the call will be matched by package registry.
+            if resolved_fn === Base.getproperty && length(args) >= 3
+                mod_arg = args[2]
+                field_arg = args[3]
+                mod_val = nothing
+                if mod_arg isa GlobalRef
+                    mod_val = try getfield(mod_arg.mod, mod_arg.name) catch; nothing end
+                elseif mod_arg isa Core.SSAValue
+                    mod_type = try ctx.code_info.ssavaluetypes[mod_arg.id] catch; nothing end
+                    if mod_type isa Core.Const
+                        mod_val = mod_type.val
+                    end
+                end
+                if mod_val isa Module
+                    return ""
                 end
             end
 
@@ -1088,6 +1108,21 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         # Base.string(...) → template literal
         if bname === :string && callee.mod === Base
             return compile_string_concat(ctx, args[2:end])
+        end
+
+        # Base.getproperty(Module, :name) → suppress (module field access in unoptimized IR)
+        if bname === :getproperty && callee.mod === Base && length(args) >= 3
+            mod_arg = args[2]
+            mod_val = nothing
+            if mod_arg isa GlobalRef
+                mod_val = try getfield(mod_arg.mod, mod_arg.name) catch; nothing end
+            elseif mod_arg isa Core.SSAValue
+                mod_type = try ctx.code_info.ssavaluetypes[mod_arg.id] catch; nothing end
+                if mod_type isa Core.Const; mod_val = mod_type.val; end
+            end
+            if mod_val isa Module
+                return ""
+            end
         end
 
         # Base.vect — array literal [1, 2, 3]
@@ -1381,6 +1416,26 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
             if receiver_type isa DataType && haskey(ctx.callable_overrides, receiver_type)
                 override_fn = ctx.callable_overrides[receiver_type]
                 receiver_js = compile_value(ctx, expr.args[2])
+
+                # Trace receiver SSA back to defining getfield to resolve correct
+                # captured_vars value (handles multiple same-type signal getters/setters)
+                if !isempty(ctx.captured_vars) && expr.args[2] isa Core.SSAValue
+                    recv_ssa_id = expr.args[2].id
+                    if recv_ssa_id >= 1 && recv_ssa_id <= length(ctx.code_info.code)
+                        recv_stmt = ctx.code_info.code[recv_ssa_id]
+                        if recv_stmt isa Expr && recv_stmt.head == :call && length(recv_stmt.args) >= 3
+                            recv_target = recv_stmt.args[2]
+                            recv_field = recv_stmt.args[3]
+                            field_name = recv_field isa QuoteNode ? recv_field.value : recv_field
+                            is_closure = (recv_target isa Core.Argument && recv_target.n == 1) ||
+                                         (recv_target isa Core.SlotNumber && recv_target.id == 1)
+                            if is_closure && field_name isa Symbol && haskey(ctx.captured_vars, field_name)
+                                receiver_js = ctx.captured_vars[field_name]
+                            end
+                        end
+                    end
+                end
+
                 return override_fn(receiver_js, call_args)
             end
         end
@@ -1630,6 +1685,14 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
     # convert(T, x) → just x (type conversions are compile-time in JS)
     if func_name == "convert" && length(call_args) >= 2
         return call_args[2]
+    end
+
+    # Check package compilation registry (for registered functions like sort_for, plotly, etc.)
+    fn_mod = meth.module
+    fn_name_sym = meth.name
+    pkg_compiler = lookup_package_compilation(fn_mod, fn_name_sym)
+    if pkg_compiler !== nothing
+        return pkg_compiler(ctx, Dict{Symbol,String}(), call_args)
     end
 
     return "$(func_name)($(join(call_args, ", ")))"
