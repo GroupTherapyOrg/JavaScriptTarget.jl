@@ -544,6 +544,18 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
     # where %20 is an SSA holding Core.Const(push!). Resolve and dispatch.
     if callee isa Core.SSAValue
         callee_type = ctx.code_info.ssavaluetypes[callee.id]
+
+        # Check callable_overrides for struct types (SignalGetter, SignalSetter, etc.)
+        if !isempty(ctx.callable_overrides)
+            override_type = callee_type isa DataType ? callee_type : nothing
+            if override_type !== nothing && haskey(ctx.callable_overrides, override_type)
+                override_fn = ctx.callable_overrides[override_type]
+                receiver_js = compile_value(ctx, callee)
+                call_args_ov = [compile_value(ctx, a) for a in args[2:end]]
+                return override_fn(receiver_js, call_args_ov)
+            end
+        end
+
         if callee_type isa Core.Const
             resolved_fn = callee_type.val
             fn_name = string(nameof(resolved_fn))
