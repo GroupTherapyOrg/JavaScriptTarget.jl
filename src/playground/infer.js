@@ -14,68 +14,68 @@
 // Constants — Well-known TypeIDs (must match Julia TypeRegistry)
 // ============================================================
 
-const TYPE_ANY     = 0;
-const TYPE_BOTTOM  = 1;
-const TYPE_NOTHING = 2;
-const TYPE_MISSING = 3;
-const TYPE_BOOL    = 4;
-const TYPE_INT8    = 5;
-const TYPE_INT16   = 6;
-const TYPE_INT32   = 7;
-const TYPE_INT64   = 8;
-const TYPE_INT128  = 9;
-const TYPE_UINT8   = 10;
-const TYPE_UINT16  = 11;
-const TYPE_UINT32  = 12;
-const TYPE_UINT64  = 13;
-const TYPE_UINT128 = 14;
-const TYPE_FLOAT16 = 15;
-const TYPE_FLOAT32 = 16;
-const TYPE_FLOAT64 = 17;
-const TYPE_CHAR    = 18;
-const TYPE_STRING  = 19;
-const TYPE_SYMBOL  = 20;
+var TYPE_ANY     = 0;
+var TYPE_BOTTOM  = 1;
+var TYPE_NOTHING = 2;
+var TYPE_MISSING = 3;
+var TYPE_BOOL    = 4;
+var TYPE_INT8    = 5;
+var TYPE_INT16   = 6;
+var TYPE_INT32   = 7;
+var TYPE_INT64   = 8;
+var TYPE_INT128  = 9;
+var TYPE_UINT8   = 10;
+var TYPE_UINT16  = 11;
+var TYPE_UINT32  = 12;
+var TYPE_UINT64  = 13;
+var TYPE_UINT128 = 14;
+var TYPE_FLOAT16 = 15;
+var TYPE_FLOAT32 = 16;
+var TYPE_FLOAT64 = 17;
+var TYPE_CHAR    = 18;
+var TYPE_STRING  = 19;
+var TYPE_SYMBOL  = 20;
 
 // Abstract types
-const TYPE_NUMBER         = 21;
-const TYPE_REAL           = 22;
-const TYPE_INTEGER        = 23;
-const TYPE_SIGNED         = 24;
-const TYPE_UNSIGNED       = 25;
-const TYPE_ABSTRACT_FLOAT = 26;
-const TYPE_ABSTRACT_STRING = 27;
-const TYPE_ABSTRACT_CHAR  = 28;
+var TYPE_NUMBER         = 21;
+var TYPE_REAL           = 22;
+var TYPE_INTEGER        = 23;
+var TYPE_SIGNED         = 24;
+var TYPE_UNSIGNED       = 25;
+var TYPE_ABSTRACT_FLOAT = 26;
+var TYPE_ABSTRACT_STRING = 27;
+var TYPE_ABSTRACT_CHAR  = 28;
 
 // Type kinds (match Julia TYPE_KIND_*)
-const KIND_SPECIAL   = 0;
-const KIND_PRIMITIVE = 1;
-const KIND_ABSTRACT  = 2;
-const KIND_CONTAINER = 3;
-const KIND_STRUCT    = 4;
+var KIND_SPECIAL   = 0;
+var KIND_PRIMITIVE = 1;
+var KIND_ABSTRACT  = 2;
+var KIND_CONTAINER = 3;
+var KIND_STRUCT    = 4;
 
 // ============================================================
 // Statement Kinds — IR representation for lowered Julia code
 // ============================================================
 
-const STMT_CALL      = 1;   // Function call: { callee: string, args: [ref...] }
-const STMT_PHI       = 2;   // Phi node:      { edges: [{ from: int, val: ref }...] }
-const STMT_GETFIELD  = 3;   // Field access:   { obj: ref, field: string }
-const STMT_NEW       = 4;   // Construction:   { typeId: int }
-const STMT_LITERAL   = 5;   // Literal value:  { typeId: int }
-const STMT_RETURN    = 6;   // Return:         { val: ref }
-const STMT_GOTO      = 7;   // Goto:           { dest: int }
-const STMT_GOTOIFNOT = 8;   // Cond branch:    { cond: ref, dest: int }
-const STMT_PINODE    = 9;   // Type narrowing:  { val: ref, typeId: int }
+var STMT_CALL      = 1;   // Function call: { callee: string, args: [ref...] }
+var STMT_PHI       = 2;   // Phi node:      { edges: [{ from: int, val: ref }...] }
+var STMT_GETFIELD  = 3;   // Field access:   { obj: ref, field: string }
+var STMT_NEW       = 4;   // Construction:   { typeId: int }
+var STMT_LITERAL   = 5;   // Literal value:  { typeId: int }
+var STMT_RETURN    = 6;   // Return:         { val: ref }
+var STMT_GOTO      = 7;   // Goto:           { dest: int }
+var STMT_GOTOIFNOT = 8;   // Cond branch:    { cond: ref, dest: int }
+var STMT_PINODE    = 9;   // Type narrowing:  { val: ref, typeId: int }
 
 // Inference constants
-const UNKNOWN    = -1;
-const MAX_ITERS  = 4;   // Loop fixed-point iterations
-const MAX_UNION  = 4;   // Max components in a union type
+var UNKNOWN    = -1;
+var MAX_ITERS  = 4;   // Loop fixed-point iterations
+var MAX_UNION  = 4;   // Max components in a union type
 
 // FNV-1a constants (must match Julia side exactly)
-const FNV_OFFSET = 0x811c9dc5;
-const FNV_PRIME  = 0x01000193;
-const ENTRY_INTS = 8;   // Int32s per hash table slot
+var FNV_OFFSET = 0x811c9dc5;
+var FNV_PRIME  = 0x01000193;
+var ENTRY_INTS = 8;   // Int32s per hash table slot
 
 // ============================================================
 // Table Loading — parse types.bin binary format
