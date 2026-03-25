@@ -57,6 +57,13 @@ function compile_function(ctx::JSCompilationContext)
         if stmt isa Expr && stmt.head === :(=)
             continue
         end
+        # Skip broadcasted descriptors (consumed by materialize, not real values)
+        if i <= length(ctx.code_info.ssavaluetypes)
+            stype = ctx.code_info.ssavaluetypes[i]
+            if stype isa DataType && stype <: Base.Broadcast.Broadcasted
+                continue
+            end
+        end
         if stmt isa Expr && stmt.head in (:call, :invoke, :new)
             # Check if this value is used anywhere
             for (j, other) in enumerate(code)
@@ -535,6 +542,154 @@ end
 """
 Compile a :call expression (intrinsics, builtins, generic calls).
 """
+# Compile Base.materialize(broadcasted_ssa) to JS .map() chains.
+# sin.(x) -> x.map(_b => Math.sin(_b)), x.*f -> x.map(_b => _b*f), etc.
+function _compile_broadcast_materialize(ctx::JSCompilationContext, bc_arg)
+    # Resolve the broadcasted SSA
+    bc_stmt = nothing
+    if bc_arg isa Core.SSAValue
+        bc_stmt = ctx.code_info.code[bc_arg.id]
+        # Handle slot assignment wrapping
+        if bc_stmt isa Expr && bc_stmt.head === :(=)
+            bc_stmt = bc_stmt.args[2]
+        end
+    end
+
+    if bc_stmt === nothing || !(bc_stmt isa Expr && bc_stmt.head === :call)
+        # Can't resolve — fallback
+        return "$(compile_value(ctx, bc_arg)).slice()"
+    end
+
+    # Parse broadcasted(fn, args...)
+    bc_callee = bc_stmt.args[1]
+    if !(bc_callee isa GlobalRef && bc_callee.name === :broadcasted)
+        return "$(compile_value(ctx, bc_arg)).slice()"
+    end
+
+    bc_fn_arg = bc_stmt.args[2]  # The function being broadcast (sin, *, +, etc.)
+    bc_data_args = bc_stmt.args[3:end]  # The data arguments
+
+    # Resolve the broadcast function
+    fn_name = nothing
+    if bc_fn_arg isa Core.SSAValue
+        fn_type = ctx.code_info.ssavaluetypes[bc_fn_arg.id]
+        if fn_type isa Core.Const
+            fn_val = fn_type.val
+            if fn_val === sin; fn_name = "Math.sin"
+            elseif fn_val === cos; fn_name = "Math.cos"
+            elseif fn_val === sqrt; fn_name = "Math.sqrt"
+            elseif fn_val === abs; fn_name = "Math.abs"
+            elseif fn_val === exp; fn_name = "Math.exp"
+            elseif fn_val === log; fn_name = "Math.log"
+            elseif fn_val === (+); fn_name = "+"
+            elseif fn_val === (-); fn_name = "-"
+            elseif fn_val === (*); fn_name = "*"
+            elseif fn_val === (/); fn_name = "/"
+            elseif fn_val === (^); fn_name = "**"
+            else fn_name = string(nameof(fn_val))
+            end
+        end
+    elseif bc_fn_arg isa GlobalRef
+        fn_name = string(bc_fn_arg.name)
+    end
+
+    if fn_name === nothing
+        return "$(compile_value(ctx, bc_arg)).slice()"
+    end
+
+    # Find which argument is the array (Vector) and which is scalar
+    # For unary: broadcasted(sin, x) → x.map(_b => Math.sin(_b))
+    # For binary: broadcasted(*, x, freq) → x.map(_b => _b * freq)
+    if length(bc_data_args) == 1
+        # Unary broadcast: fn.(arr)
+        inner = bc_data_args[1]
+        # Check if inner is itself a broadcasted (nested: sin.(x .* f))
+        inner_is_broadcast = false
+        if inner isa Core.SSAValue
+            inner_stmt = ctx.code_info.code[inner.id]
+            if inner_stmt isa Expr && inner_stmt.head === :(=)
+                inner_stmt = inner_stmt.args[2]
+            end
+            if inner_stmt isa Expr && inner_stmt.head === :call
+                ic = inner_stmt.args[1]
+                if ic isa GlobalRef && ic.name === :broadcasted
+                    inner_is_broadcast = true
+                end
+            end
+        end
+
+        if inner_is_broadcast
+            # Nested broadcast: fn.(inner_broadcast)
+            # Compile inner as a .map() first, then apply outer
+            inner_js = _compile_broadcast_materialize(ctx, inner)
+            if fn_name in ("Math.sin", "Math.cos", "Math.sqrt", "Math.abs", "Math.exp", "Math.log")
+                return "$(inner_js).map(function(_b) { return $(fn_name)(_b); })"
+            else
+                return "$(inner_js).map(function(_b) { return $(fn_name)(_b); })"
+            end
+        else
+            arr_js = compile_value(ctx, inner)
+            if fn_name in ("Math.sin", "Math.cos", "Math.sqrt", "Math.abs", "Math.exp", "Math.log")
+                return "$(arr_js).map(function(_b) { return $(fn_name)(_b); })"
+            elseif fn_name == "-"
+                return "$(arr_js).map(function(_b) { return -_b; })"
+            else
+                return "$(arr_js).map(function(_b) { return $(fn_name)(_b); })"
+            end
+        end
+    elseif length(bc_data_args) == 2
+        # Binary broadcast: arr .op scalar or arr .op arr
+        left = bc_data_args[1]
+        right = bc_data_args[2]
+
+        # Determine which is array and which is scalar
+        left_type = if left isa Core.SSAValue
+            ctx.code_info.ssavaluetypes[left.id]
+        elseif left isa Core.SlotNumber && left.id <= length(ctx.code_info.slottypes)
+            ctx.code_info.slottypes[left.id]
+        elseif left isa Core.Argument && left.n <= length(ctx.arg_types) + 1
+            left.n == 1 ? nothing : ctx.arg_types[left.n - 1]
+        else
+            nothing
+        end
+
+        right_type = if right isa Core.SSAValue
+            ctx.code_info.ssavaluetypes[right.id]
+        elseif right isa Core.SlotNumber && right.id <= length(ctx.code_info.slottypes)
+            ctx.code_info.slottypes[right.id]
+        elseif right isa Core.Argument && right.n <= length(ctx.arg_types) + 1
+            right.n == 1 ? nothing : ctx.arg_types[right.n - 1]
+        else
+            nothing
+        end
+
+        left_is_array = left_type isa DataType && left_type <: AbstractArray
+        right_is_array = right_type isa DataType && right_type <: AbstractArray
+
+        left_js = compile_value(ctx, left)
+        right_js = compile_value(ctx, right)
+
+        op = fn_name  # +, -, *, /, **
+
+        if left_is_array && !right_is_array
+            # arr .op scalar → arr.map(_b => _b op scalar)
+            return "$(left_js).map(function(_b) { return (_b $(op) $(right_js)); })"
+        elseif !left_is_array && right_is_array
+            # scalar .op arr → arr.map(_b => scalar op _b)
+            return "$(right_js).map(function(_b) { return ($(left_js) $(op) _b); })"
+        elseif left_is_array && right_is_array
+            # arr .op arr → arr.map((_b, _i) => _b op other[_i])
+            return "$(left_js).map(function(_b, _i) { return (_b $(op) $(right_js)[_i]); })"
+        else
+            # Both scalar? Shouldn't happen with broadcasting, but handle gracefully
+            return "($(left_js) $(op) $(right_js))"
+        end
+    end
+
+    # Fallback
+    return "$(compile_value(ctx, bc_data_args[1])).slice()"
+end
+
 function compile_call(ctx::JSCompilationContext, expr::Expr)
     args = expr.args
     callee = args[1]
@@ -765,6 +920,19 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             if length(call_args_gr) == 2
                 return "$(call_args_gr[1])[($(call_args_gr[2])) - 1]"
             end
+        end
+
+        # Base.materialize — execute broadcasting: sin.(x) → x.map(v => Math.sin(v))
+        if bname === :materialize && callee.mod === Base
+            if length(args) >= 2
+                return _compile_broadcast_materialize(ctx, args[2])
+            end
+        end
+
+        # Base.broadcasted — lazy broadcast descriptor (compiled when materialize is called)
+        # Returns empty string as these are consumed by materialize, not standalone
+        if bname === :broadcasted && callee.mod === Base
+            return ""
         end
 
         # Base.iterate — for-loop iteration
