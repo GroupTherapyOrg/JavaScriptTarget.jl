@@ -811,6 +811,11 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 return "$(func_js)($(join(pos_compiled, ", ")))"
             end
 
+            # Skip NamedTuple constructors (consumed by kwcall, not needed in JS)
+            if resolved_fn isa Type && resolved_fn <: NamedTuple
+                return ""
+            end
+
             # Check package registry for positional calls
             if resolved_fn isa Function
                 fn_mod = parentmodule(resolved_fn)
