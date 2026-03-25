@@ -1001,6 +1001,28 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         end
     end
 
+    # ─── Skip type-level operations (dead code in unoptimized IR) ───
+    # Core.apply_type(NamedTuple, ...) and NamedTuple constructors are compile-time
+    # operations used for kwcall dispatch — they're consumed by _extract_kwargs
+    if callee isa GlobalRef && callee.name === :apply_type && callee.mod === Core
+        return ""
+    end
+
+    # NamedTuple constructor: (%apply_type_result)(%tuple) — skip if result is NamedTuple
+    if callee isa Core.SSAValue
+        ct = ctx.code_info.ssavaluetypes[callee.id]
+        if ct isa Core.Const && ct.val isa Type && ct.val <: NamedTuple
+            return ""
+        end
+    end
+
+    # Core.tuple used for kwargs assembly — skip if result feeds into NamedTuple
+    if (callee isa GlobalRef && callee.name === :tuple && callee.mod === Core) ||
+       (callee isa typeof(Core.tuple))
+        # Check if result type is a plain Tuple (kwargs values) — keep it if it's used elsewhere
+        # but suppress the line emission (it'll be inlined by compile_value)
+    end
+
     # Check for Core.Intrinsics — may be referenced via Base.add_int etc.
     if callee isa GlobalRef
         resolved = try
