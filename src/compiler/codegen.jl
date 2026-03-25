@@ -479,7 +479,9 @@ Emit an expression statement, assigning to local if needed.
 function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
     if expr.head === :call
         result = compile_call(ctx, expr)
-        if haskey(ctx.js_locals, idx)
+        if isempty(result)
+            # Suppressed call (e.g., NamedTuple constructor, apply_type) — skip
+        elseif haskey(ctx.js_locals, idx)
             name = ctx.js_locals[idx]
             print(buf, "$(indent)$(name) = $(result);\n")
         else
@@ -488,7 +490,9 @@ function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
         end
     elseif expr.head === :invoke
         result = compile_invoke(ctx, expr)
-        if haskey(ctx.js_locals, idx)
+        if isempty(result)
+            # Suppressed
+        elseif haskey(ctx.js_locals, idx)
             name = ctx.js_locals[idx]
             print(buf, "$(indent)$(name) = $(result);\n")
         else
@@ -496,7 +500,9 @@ function compile_expr_stmt!(ctx, buf, idx, expr::Expr, indent::String)
         end
     elseif expr.head === :new
         result = compile_new_expr(ctx, expr)
-        if haskey(ctx.js_locals, idx)
+        if isempty(result)
+            # Suppressed
+        elseif haskey(ctx.js_locals, idx)
             name = ctx.js_locals[idx]
             print(buf, "$(indent)$(name) = $(result);\n")
         else
