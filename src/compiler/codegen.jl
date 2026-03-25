@@ -767,6 +767,20 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
     func_name = string(meth.name)
     call_args = [compile_value(ctx, a) for a in expr.args[3:end]]
 
+    # Callable overrides: intercept calls on overridden struct types
+    # Used by Therapy.jl to map signal getter/setter calls to JS variable ops
+    if !isempty(ctx.callable_overrides)
+        sig_params = mi.specTypes.parameters
+        if length(sig_params) >= 1
+            receiver_type = sig_params[1]
+            if receiver_type isa DataType && haskey(ctx.callable_overrides, receiver_type)
+                override_fn = ctx.callable_overrides[receiver_type]
+                receiver_js = compile_value(ctx, expr.args[2])
+                return override_fn(receiver_js, call_args)
+            end
+        end
+    end
+
     # Known function mappings
     math_fns = Dict(
         "sin" => "Math.sin", "cos" => "Math.cos", "tan" => "Math.tan",
@@ -1073,6 +1087,7 @@ function compile_closure_creation(ctx::JSCompilationContext, T::DataType, captur
     closure_ctx = JSCompilationContext(ci, closure_arg_types, rt, "")
     closure_ctx.arg_names = closure_arg_names
     closure_ctx.captured_vars = captured_vals
+    closure_ctx.callable_overrides = ctx.callable_overrides
 
     # Compile the closure body
     js_body = compile_function(closure_ctx)
@@ -1413,10 +1428,21 @@ function compile(f, arg_types::Tuple;
     sourcemap::Bool=false,
     dts::Bool=true,
     func_name::Union{String, Nothing}=nothing,
+    captured_vars::Dict{Symbol, String}=Dict{Symbol, String}(),
+    callable_overrides::Dict{DataType, Function}=Dict{DataType, Function}(),
 )
     code_info, return_type = get_typed_ir(f, arg_types; optimize=optimize)
     name = sanitize_js_name(something(func_name, string(nameof(f))))
     ctx = JSCompilationContext(code_info, arg_types, return_type, name)
+
+    # Apply caller-provided captured_vars and callable_overrides
+    # (used for compiling closures directly, e.g., island event handlers)
+    if !isempty(captured_vars)
+        merge!(ctx.captured_vars, captured_vars)
+    end
+    if !isempty(callable_overrides)
+        merge!(ctx.callable_overrides, callable_overrides)
+    end
 
     # Register struct types from function arguments (including Union members)
     for T in arg_types

@@ -28,6 +28,7 @@ mutable struct JSCompilationContext
     abstract_ranges::Dict{Type, Tuple{Int,Int}}  # Abstract type → (lo, hi) range
     type_id_counter::Int
     required_runtime::Set{Symbol}        # Runtime helpers needed by compiled code
+    callable_overrides::Dict{DataType, Function}  # Callable struct type → (recv_js, args_js) → JS
 end
 
 function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return_type::Type, func_name::String)
@@ -61,6 +62,7 @@ function JSCompilationContext(code_info::Core.CodeInfo, arg_types::Tuple, return
         Dict{Type, Tuple{Int,Int}}(),
         0,
         Set{Symbol}(),
+        Dict{DataType, Function}(),
     )
 end
 
