@@ -968,6 +968,23 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
         return "jl_print($(join(call_args, ", ")))"
     end
 
+    # JS escape hatch: js("raw code") → emits string content as raw JavaScript
+    # Used by Therapy.jl to call browser APIs (document, localStorage, etc.)
+    if func_name == "js"
+        if length(expr.args) >= 3 && expr.args[3] isa String
+            return expr.args[3]
+        end
+        # Fallback: compiled arg with quotes stripped
+        if length(call_args) >= 1
+            s = call_args[1]
+            if length(s) >= 2 && s[1] == '"' && s[end] == '"'
+                return replace(replace(s[2:end-1], "\\\"" => "\""), "\\\\" => "\\")
+            end
+            return s
+        end
+        return "/* js() called with no arguments */"
+    end
+
     # Math: div, fld, mod, cld, rem
     if func_name == "div" && length(call_args) >= 2
         require_runtime!(ctx, :jl_div)
