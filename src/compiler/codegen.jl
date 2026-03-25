@@ -542,6 +542,69 @@ end
 """
 Compile a :call expression (intrinsics, builtins, generic calls).
 """
+# Extract keyword arguments from a NamedTuple SSA in unoptimized IR.
+# The IR pattern is: Core.apply_type(NamedTuple, (:x,:y,:mode)), Core.tuple(vals...), NamedTupleType(tuple)
+# Returns Dict{Symbol, String} mapping kwarg names to compiled JS expressions.
+function _extract_kwargs(ctx::JSCompilationContext, kwargs_ssa)
+    kwargs = Dict{Symbol, String}()
+
+    if !(kwargs_ssa isa Core.SSAValue)
+        return kwargs
+    end
+
+    # The kwargs SSA points to a NamedTuple constructor call
+    nt_stmt = ctx.code_info.code[kwargs_ssa.id]
+
+    # Handle (:=) wrapping
+    if nt_stmt isa Expr && nt_stmt.head === :(=)
+        nt_stmt = nt_stmt.args[2]
+    end
+
+    # Pattern: (%apply_type_result)(%tuple_of_values)
+    # Where apply_type_result = Core.apply_type(NamedTuple, (:x, :y, :mode))
+    if !(nt_stmt isa Expr && nt_stmt.head === :call)
+        return kwargs
+    end
+
+    # Get the NamedTuple type (has field names) from the callee
+    type_ssa = nt_stmt.args[1]
+    values_ssa = length(nt_stmt.args) >= 2 ? nt_stmt.args[2] : nothing
+
+    # Resolve field names from the type
+    field_names = Symbol[]
+    if type_ssa isa Core.SSAValue
+        type_type = ctx.code_info.ssavaluetypes[type_ssa.id]
+        if type_type isa Core.Const && type_type.val isa DataType
+            nt_type = type_type.val
+            if nt_type <: NamedTuple
+                field_names = collect(nt_type.parameters[1])
+            end
+        end
+    end
+
+    if isempty(field_names) || values_ssa === nothing
+        return kwargs
+    end
+
+    # Resolve values from the tuple
+    if values_ssa isa Core.SSAValue
+        vals_stmt = ctx.code_info.code[values_ssa.id]
+        if vals_stmt isa Expr && vals_stmt.head === :call
+            vals_callee = vals_stmt.args[1]
+            if vals_callee isa GlobalRef && vals_callee.name === :tuple
+                vals = vals_stmt.args[2:end]
+                for (i, name) in enumerate(field_names)
+                    if i <= length(vals)
+                        kwargs[name] = compile_value(ctx, vals[i])
+                    end
+                end
+            end
+        end
+    end
+
+    return kwargs
+end
+
 # Compile Base.materialize(broadcasted_ssa) to JS .map() chains.
 # sin.(x) -> x.map(_b => Math.sin(_b)), x.*f -> x.map(_b => _b*f), etc.
 function _compile_broadcast_materialize(ctx::JSCompilationContext, bc_arg)
@@ -716,6 +779,16 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             fn_name = string(nameof(resolved_fn))
             call_args = [compile_value(ctx, a) for a in args[2:end]]
 
+            # Check package registry for positional calls
+            if resolved_fn isa Function
+                fn_mod = parentmodule(resolved_fn)
+                fn_sym = nameof(resolved_fn)
+                compiler_fn = lookup_package_compilation(fn_mod, fn_sym)
+                if compiler_fn !== nothing
+                    return compiler_fn(ctx, Dict{Symbol,String}(), call_args)
+                end
+            end
+
             # Array creation: Float64[] → getindex(Float64) → []
             # Also handles array indexing: arr[i] → arr[i-1]
             if resolved_fn === Base.getindex
@@ -845,6 +918,49 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
 
             # Fallback: emit as function call
             return "$(fn_name)($(join(call_args, ", ")))"
+        end
+    end
+
+    # ─── Handle Core.kwcall (keyword argument function calls) ───
+    # IR: Core.kwcall(NamedTuple{(:x,:y,:mode)}(vals...), func, pos_args...)
+    # Check package registry for the target function
+    if callee isa typeof(Core.kwcall) || (callee isa GlobalRef && callee.name === :kwcall && callee.mod === Core)
+        if length(args) >= 3
+            # args[2] = NamedTuple with kwargs, args[3] = function, args[4:end] = positional
+            kwargs_ssa = args[2]
+            func_ssa = args[3]
+            pos_raw = args[4:end]
+
+            # Resolve the function being called
+            func_type = nothing
+            if func_ssa isa Core.SSAValue
+                func_type = ctx.code_info.ssavaluetypes[func_ssa.id]
+            elseif func_ssa isa GlobalRef
+                func_type = try Core.Const(getfield(func_ssa.mod, func_ssa.name)) catch; nothing end
+            end
+
+            if func_type isa Core.Const
+                fn = func_type.val
+                fn_mod = parentmodule(fn)
+                fn_name = nameof(fn)
+
+                # Check package registry
+                compiler_fn = lookup_package_compilation(fn_mod, fn_name)
+                if compiler_fn !== nothing
+                    # Extract kwargs from NamedTuple construction
+                    kwargs = _extract_kwargs(ctx, kwargs_ssa)
+                    pos_args = [compile_value(ctx, a) for a in pos_raw]
+                    return compiler_fn(ctx, kwargs, pos_args)
+                end
+            end
+        end
+        # Fallback: compile as regular call (strip kwargs)
+        if length(args) >= 3
+            func_js = compile_value(ctx, args[3])
+            pos_args = [compile_value(ctx, a) for a in args[4:end]]
+            kwargs = _extract_kwargs(ctx, args[2])
+            all_args = vcat(pos_args, ["$(k)=$(v)" for (k, v) in kwargs])
+            return "$(func_js)($(join(all_args, ", ")))"
         end
     end
 
