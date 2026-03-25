@@ -850,14 +850,14 @@ function lowerStringInterp(node, ctx, mod) {
   var args = [];
   for (var i = 0; i < node.parts.length; i++) {
     var part = node.parts[i];
-    if (part.kind === 'literal') {
+    if (part.kind === 'literal' || part.kind === 'StringLit') {
       args.push(ctx.emit({ kind: STMT_LITERAL, typeId: TYPE_STRING, value: part.value }));
-    } else if (part.kind === 'name') {
-      var ref = ctx.lookup(part.value);
+    } else if (part.kind === 'name' || part.kind === 'Identifier') {
+      var ref = ctx.lookup(part.name || part.value);
       if (ref) {
         args.push(ref);
       } else {
-        args.push(ctx.emit({ kind: STMT_CALL, callee: '$global', args: [], _name: part.value }));
+        args.push(ctx.emit({ kind: STMT_CALL, callee: '$global', args: [], _name: part.name || part.value }));
       }
     } else if (part.kind === 'expr') {
       // Expression interpolation $(expr) — tokens need re-parsing
