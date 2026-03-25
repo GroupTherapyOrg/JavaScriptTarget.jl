@@ -1735,7 +1735,8 @@ function compile_intrinsic(ctx::JSCompilationContext, name::Symbol, args::Abstra
     elseif name === :not_int
         # Bool: use logical NOT; integers: use bitwise NOT
         arg_type = _get_ssa_type(ctx, args[1])
-        if arg_type === Bool
+        is_bool = arg_type === Bool || (arg_type isa Core.Const && arg_type.val isa Bool)
+        if is_bool
             return "!($(compiled_args[1]))"
         end
         return "(~$(compiled_args[1]))"
