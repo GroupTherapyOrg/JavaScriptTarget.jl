@@ -574,10 +574,13 @@ function _extract_kwargs(ctx::JSCompilationContext, kwargs_ssa)
     field_names = Symbol[]
     if type_ssa isa Core.SSAValue
         type_type = ctx.code_info.ssavaluetypes[type_ssa.id]
-        if type_type isa Core.Const && type_type.val isa DataType
+        if type_type isa Core.Const
             nt_type = type_type.val
-            if nt_type <: NamedTuple
+            if nt_type isa DataType && nt_type <: NamedTuple
                 field_names = collect(nt_type.parameters[1])
+            elseif nt_type isa UnionAll && nt_type <: NamedTuple
+                # NamedTuple{(:x,:y)} is UnionAll — field names in .body.parameters[1]
+                field_names = collect(nt_type.body.parameters[1])
             end
         end
     end
@@ -816,6 +819,11 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 if compiler_fn !== nothing
                     return compiler_fn(ctx, Dict{Symbol,String}(), call_args)
                 end
+            end
+
+            # Array literal: [1.0, 2.0, 3.0] → Base.vect(1.0, 2.0, 3.0) → [1.0, 2.0, 3.0]
+            if resolved_fn === Base.vect
+                return "[$(join(call_args, ", "))]"
             end
 
             # Array creation: Float64[] → getindex(Float64) → []

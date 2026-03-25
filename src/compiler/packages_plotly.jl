@@ -35,13 +35,29 @@ end
 # ─── Plot function: creates/updates a Plotly chart ───
 
 function _plotly_plot_compiler(ctx, kwargs, pos_args)
-    # pos_args[1] = traces (array), pos_args[2] = layout (optional)
-    # kwargs may include: divid (element ID)
-    traces_js = length(pos_args) >= 1 ? pos_args[1] : "[]"
-    layout_js = length(pos_args) >= 2 ? pos_args[2] : "{}"
+    # Positional: plotly(divid, traces, layout) OR plot(traces, layout)
+    # Detect by checking if first arg looks like a string (divid)
+    el_id = "\"therapy-plot\""
+    traces_js = "[]"
+    layout_js = "{}"
 
-    # Get target element ID from kwargs or default
-    el_id = get(kwargs, :divid, "\"therapy-plot\"")
+    if length(pos_args) >= 3
+        # plotly(divid, traces, layout)
+        el_id = pos_args[1]
+        traces_js = pos_args[2]
+        layout_js = pos_args[3]
+    elseif length(pos_args) >= 2
+        # plot(traces, layout) or plotly(divid, traces)
+        traces_js = pos_args[1]
+        layout_js = pos_args[2]
+    elseif length(pos_args) >= 1
+        traces_js = pos_args[1]
+    end
+
+    # Override with kwargs if present
+    if haskey(kwargs, :divid)
+        el_id = kwargs[:divid]
+    end
 
     return "(function() { var _el = document.getElementById($(el_id)); if (_el && typeof Plotly !== 'undefined') { Plotly.react(_el, $(traces_js), $(layout_js), {responsive: true, displayModeBar: false}); } else if (_el) { var _s = document.createElement('script'); _s.src = 'https://cdn.plot.ly/plotly-2.35.2.min.js'; _s.onload = function() { Plotly.newPlot(_el, $(traces_js), $(layout_js), {responsive: true, displayModeBar: false}); }; document.head.appendChild(_s); } }())"
 end
