@@ -26,3 +26,8 @@ makedocs(;
 
 # Deployment handled by GitHub Actions (actions/deploy-pages)
 # No deploydocs() needed — workflow uploads docs/build/ directly
+
+# Create stub files that Documenter.jl HTML expects but deploydocs() normally creates
+build_dir = joinpath(@__DIR__, "build")
+write(joinpath(build_dir, "siteinfo.js"), "var defined = 'dev';")
+write(joinpath(build_dir, "versions.js"), "var defined = 'dev';")

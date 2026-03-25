@@ -6,7 +6,7 @@ A standalone Julia-to-JavaScript transpiler. Compile Julia functions to JavaScri
 
 ```@raw html
 <div class="playground-embed">
-<iframe src="../assets/playground/index.html" title="Julia Playground"></iframe>
+<iframe src="assets/playground/index.html" title="Julia Playground"></iframe>
 </div>
 ```
 
