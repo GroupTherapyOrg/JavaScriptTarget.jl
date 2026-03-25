@@ -827,7 +827,9 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         obj = args[2]
         field_arg = args[3]
         # Closure captured variable: getfield(self, :name)
-        if obj isa Core.Argument && obj.n == 1 && field_arg isa QuoteNode && field_arg.value isa Symbol
+        # In optimized IR: Core.Argument(1), in unoptimized IR: Core.SlotNumber(1)
+        is_self = (obj isa Core.Argument && obj.n == 1) || (obj isa Core.SlotNumber && obj.id == 1)
+        if is_self && field_arg isa QuoteNode && field_arg.value isa Symbol
             fname = field_arg.value
             if haskey(ctx.captured_vars, fname)
                 return ctx.captured_vars[fname]
