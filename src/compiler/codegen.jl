@@ -779,6 +779,35 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             fn_name = string(nameof(resolved_fn))
             call_args = [compile_value(ctx, a) for a in args[2:end]]
 
+            # Handle Core.kwcall — keyword argument function calls
+            if resolved_fn === Core.kwcall && length(args) >= 3
+                kwargs_ssa = args[2]
+                func_ssa = args[3]
+                pos_raw = args[4:end]
+
+                func_type = nothing
+                if func_ssa isa Core.SSAValue
+                    func_type = ctx.code_info.ssavaluetypes[func_ssa.id]
+                end
+
+                if func_type isa Core.Const
+                    fn = func_type.val
+                    fn_mod = parentmodule(fn)
+                    fn_sym = nameof(fn)
+                    compiler_fn = lookup_package_compilation(fn_mod, fn_sym)
+                    if compiler_fn !== nothing
+                        kwargs = _extract_kwargs(ctx, kwargs_ssa)
+                        pos_args_kw = [compile_value(ctx, a) for a in pos_raw]
+                        return compiler_fn(ctx, kwargs, pos_args_kw)
+                    end
+                end
+
+                # Fallback for unregistered kwcall
+                func_js = compile_value(ctx, func_ssa)
+                pos_compiled = [compile_value(ctx, a) for a in pos_raw]
+                return "$(func_js)($(join(pos_compiled, ", ")))"
+            end
+
             # Check package registry for positional calls
             if resolved_fn isa Function
                 fn_mod = parentmodule(resolved_fn)

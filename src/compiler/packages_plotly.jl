@@ -73,4 +73,7 @@ function register_plotly_compilations!(mod::Module)
     if isdefined(mod, :plot)
         register_package_compilation!(_plotly_plot_compiler, mod, :plot)
     end
+    if isdefined(mod, :plotly)
+        register_package_compilation!(_plotly_plot_compiler, mod, :plotly)
+    end
 end
