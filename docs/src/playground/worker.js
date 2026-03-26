@@ -51,18 +51,21 @@ function compileAndRun(source) {
     diagnostics = result.diagnostics || [];
 
     // Step 2: Execute the compiled JS and capture output
-    // Prepend runtime overrides so jl_println captures output
+    // The codegen output includes jl_println (console.log) + $main() call.
+    // Strip the $main() call, override jl_println to capture, then call $main().
+    var jsBody = js.replace(/\$main\(\);?\s*$/, '');  // Remove trailing $main() call
     var execCode =
       'var _jl_output = [];\n' +
-      'function jl_println() {\n' +
+      jsBody + '\n' +
+      'jl_println = function() {\n' +
       '  var a = []; for (var i = 0; i < arguments.length; i++) {\n' +
       '    var v = arguments[i]; a.push(v === null ? "nothing" : v === undefined ? "missing" : String(v));\n' +
-      '  }\n  _jl_output.push(a.join("") + "\\n");\n}\n' +
-      'function jl_print() {\n' +
+      '  }\n  _jl_output.push(a.join("") + "\\n");\n};\n' +
+      'jl_print = function() {\n' +
       '  var a = []; for (var i = 0; i < arguments.length; i++) {\n' +
       '    var v = arguments[i]; a.push(v === null ? "nothing" : v === undefined ? "missing" : String(v));\n' +
-      '  }\n  _jl_output.push(a.join(""));\n}\n' +
-      js + '\n' +
+      '  }\n  _jl_output.push(a.join(""));\n};\n' +
+      'if (typeof $main === "function") { var _r = $main(); if (_r !== null && _r !== undefined) _jl_output.push(String(_r) + "\\n"); }\n' +
       '_jl_output.join("")';
 
     try {
