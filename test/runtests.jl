@@ -3551,7 +3551,34 @@ process.stdout.write(JSON.stringify(r));
         end
         @test compile_unopt_and_run(fn, "") == "[19,43,22,50]"
     end
-    # Note: nested for loops (for i; for j; for k) have a known JST bug
-    # where inner loop `break` exits the outer while loop. Single for loops work.
-    # TODO: fix nested for loop compilation in JST
+    @testset "ND: nested loop sum" begin
+        fn = () -> begin
+            total = 0
+            for i in 1:3; for j in 1:2; total = total + i * j; end; end
+            return total
+        end
+        @test compile_unopt_and_run(fn, "") == "18"
+    end
+    @testset "ND: triple nested loop" begin
+        fn = () -> begin
+            total = 0
+            for i in 1:2; for j in 1:2; for k in 1:2; total = total + 1; end; end; end
+            return total
+        end
+        @test compile_unopt_and_run(fn, "") == "8"
+    end
+    @testset "ND: matmul 2x2 (triple nested)" begin
+        fn = () -> begin
+            A=zeros(2,2); A[1,1]=1.0; A[1,2]=2.0; A[2,1]=3.0; A[2,2]=4.0
+            B=zeros(2,2); B[1,1]=5.0; B[1,2]=6.0; B[2,1]=7.0; B[2,2]=8.0
+            C=zeros(2,2)
+            for i in 1:2; for j in 1:2; s=0.0
+                for k in 1:2; s=s+A[i,k]*B[k,j]; end
+                C[i,j]=s
+            end; end
+            C
+        end
+        # A*B = [[19,22],[43,50]], column-major flat = [19,43,22,50]
+        @test compile_unopt_and_run(fn, "") == "[19,43,22,50]"
+    end
 end

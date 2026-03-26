@@ -337,6 +337,43 @@ function emit_loop_body!(ctx, buf, code, start_idx, end_idx, loop_headers, backw
     while i <= end_idx
         stmt = code[i]
 
+        # ─── Nested loop header: emit inner while(true) ───
+        if i in loop_headers && i != loop_header
+            inner_loop_end = 0
+            for (src, tgt) in backward_edges
+                if tgt == i
+                    inner_loop_end = src
+                    break
+                end
+            end
+            if inner_loop_end > 0
+                # Initialize inner loop phi variables
+                for phi_idx in sort(collect(keys(phi_info)))
+                    if phi_idx >= i && phi_idx <= inner_loop_end
+                        phi = phi_info[phi_idx]
+                        var_name = ctx.js_locals[phi_idx]
+                        for (k, edge) in enumerate(phi.edges)
+                            if edge < i
+                                if isassigned(phi.values, k)
+                                    val = compile_value(ctx, phi.values[k])
+                                    print(buf, "$(indent)$(var_name) = $(val);\n")
+                                end
+                            end
+                        end
+                    end
+                end
+                print(buf, "$(indent)while (true) {\n")
+                inner_body_start = i
+                while inner_body_start <= inner_loop_end && code[inner_body_start] isa Core.PhiNode
+                    inner_body_start += 1
+                end
+                emit_loop_body!(ctx, buf, code, inner_body_start, inner_loop_end, loop_headers, backward_edges, forward_gotos, phi_info, depth + 1, i)
+                print(buf, "$(indent)}\n")
+                i = inner_loop_end + 1
+                continue
+            end
+        end
+
         if stmt isa Core.GotoIfNot
             cond = compile_value(ctx, stmt.cond)
             target = stmt.dest
