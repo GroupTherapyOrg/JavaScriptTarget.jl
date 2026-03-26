@@ -3515,4 +3515,43 @@ process.stdout.write(JSON.stringify(r));
         fn = () -> startswith("hello", "he")
         @test compile_unopt_and_run(fn, "") == "true"
     end
+
+    # ─── ND Array tests (e2e via Node.js) ───
+    @testset "ND: zeros(3,4)" begin
+        @test compile_unopt_and_run(() -> zeros(3, 4), "") == "[0,0,0,0,0,0,0,0,0,0,0,0]"
+    end
+    @testset "ND: ones(2,3)" begin
+        @test compile_unopt_and_run(() -> ones(2, 3), "") == "[1,1,1,1,1,1]"
+    end
+    @testset "ND: length(zeros(3,4))" begin
+        @test compile_unopt_and_run(() -> length(zeros(3, 4)), "") == "12"
+    end
+    @testset "ND: size(A,1)" begin
+        @test compile_unopt_and_run(() -> size(zeros(3, 4), 1), "") == "3"
+    end
+    @testset "ND: size(A,2)" begin
+        @test compile_unopt_and_run(() -> size(zeros(3, 4), 2), "") == "4"
+    end
+    @testset "ND: A[i,j] set+get" begin
+        @test compile_unopt_and_run(() -> begin A=zeros(2,3); A[1,2]=42.0; A[1,2] end, "") == "42"
+    end
+    @testset "ND: column-major indexing" begin
+        @test compile_unopt_and_run(() -> begin A=zeros(2,3); A[2,1]=10.0; A[1,2]=20.0; A[2,2]=30.0; A end, "") == "[0,10,20,30,0,0]"
+    end
+    @testset "ND: unrolled matmul" begin
+        fn = () -> begin
+            A=zeros(2,2); A[1,1]=1.0; A[1,2]=2.0; A[2,1]=3.0; A[2,2]=4.0
+            B=zeros(2,2); B[1,1]=5.0; B[1,2]=6.0; B[2,1]=7.0; B[2,2]=8.0
+            C=zeros(2,2)
+            C[1,1] = A[1,1]*B[1,1] + A[1,2]*B[2,1]
+            C[2,1] = A[2,1]*B[1,1] + A[2,2]*B[2,1]
+            C[1,2] = A[1,1]*B[1,2] + A[1,2]*B[2,2]
+            C[2,2] = A[2,1]*B[1,2] + A[2,2]*B[2,2]
+            return C
+        end
+        @test compile_unopt_and_run(fn, "") == "[19,43,22,50]"
+    end
+    # Note: nested for loops (for i; for j; for k) have a known JST bug
+    # where inner loop `break` exits the outer while loop. Single for loops work.
+    # TODO: fix nested for loop compilation in JST
 end

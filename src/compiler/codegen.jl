@@ -878,16 +878,21 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 # Array indexing: arr[i] → arr[i-1]
                 # Range indexing: arr[a:b] → arr.slice(a-1, b)
                 if length(call_args) == 2
-                    idx_arg = args[3]  # The index argument (before compilation)
+                    idx_arg = args[3]
                     idx_type = nothing
                     if idx_arg isa Core.SSAValue
                         idx_type = try ctx.code_info.ssavaluetypes[idx_arg.id] catch; nothing end
                     end
-                    # Check if index is a range (UnitRange) → slice
                     if idx_type !== nothing && idx_type isa DataType && idx_type <: AbstractRange
                         return "$(call_args[1]).slice(($(call_args[2])).start-1,($(call_args[2])).stop)"
                     end
                     return "$(call_args[1])[($(call_args[2])) - 1]"
+                elseif length(call_args) == 3
+                    # A[i,j] → column-major flat index: (j-1)*nrows + (i-1)
+                    return "$(call_args[1])[(($(call_args[3]))-1)*$(call_args[1])._size[0]+(($(call_args[2]))-1)]"
+                elseif length(call_args) == 4
+                    # A[i,j,k] → column-major: (k-1)*m*n + (j-1)*m + (i-1)
+                    return "$(call_args[1])[(($(call_args[4]))-1)*$(call_args[1])._size[0]*$(call_args[1])._size[1]+(($(call_args[3]))-1)*$(call_args[1])._size[0]+(($(call_args[2]))-1)]"
                 end
                 return "[]"
             end
@@ -1031,6 +1036,18 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             if fn_name == "sort" && length(call_args) >= 1
                 return "$(call_args[1]).slice().sort()"
             end
+            if fn_name == "setindex!" && length(call_args) >= 3
+                if length(call_args) == 4
+                    # A[i,j] = val → column-major
+                    return "($(call_args[1])[(($(call_args[4]))-1)*$(call_args[1])._size[0]+(($(call_args[3]))-1)] = $(call_args[2]))"
+                else
+                    return "($(call_args[1])[($(call_args[3]))-1] = $(call_args[2]))"
+                end
+            end
+            if fn_name == "getindex" && length(call_args) == 3
+                # A[i,j] → column-major
+                return "$(call_args[1])[(($(call_args[3]))-1)*$(call_args[1])._size[0]+(($(call_args[2]))-1)]"
+            end
             if fn_name == "copy" && length(call_args) >= 1
                 return "$(call_args[1]).slice()"
             end
@@ -1058,15 +1075,39 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 return "$(call_args[2]).reduce($(call_args[1]))"
             end
 
-            # ─── Construction (by name) ───
-            if fn_name == "zeros" && length(call_args) >= 1
-                return "new Array($(call_args[1])).fill(0)"
+            # ─── Construction (by name, 1D and ND) ───
+            if fn_name == "zeros"
+                if length(call_args) == 1
+                    return "new Array($(call_args[1])).fill(0)"
+                elseif length(call_args) >= 2
+                    require_runtime!(ctx, :jl_ndarray)
+                    return "jl_ndarray(0,[$(join(call_args, ","))])"
+                end
             end
-            if fn_name == "ones" && length(call_args) >= 1
-                return "new Array($(call_args[1])).fill(1)"
+            if fn_name == "ones"
+                if length(call_args) == 1
+                    return "new Array($(call_args[1])).fill(1)"
+                elseif length(call_args) >= 2
+                    require_runtime!(ctx, :jl_ndarray)
+                    return "jl_ndarray(1,[$(join(call_args, ","))])"
+                end
             end
-            if fn_name == "fill" && length(call_args) >= 2
-                return "new Array($(call_args[2])).fill($(call_args[1]))"
+            if fn_name == "fill"
+                if length(call_args) == 2
+                    return "new Array($(call_args[2])).fill($(call_args[1]))"
+                elseif length(call_args) >= 3
+                    require_runtime!(ctx, :jl_ndarray)
+                    return "jl_ndarray($(call_args[1]),[$(join(call_args[2:end], ","))])"
+                end
+            end
+
+            # ─── Size (by name) ───
+            if fn_name == "size"
+                if length(call_args) == 1
+                    return "($(call_args[1])._size||[$(call_args[1]).length]).slice()"
+                elseif length(call_args) == 2
+                    return "($(call_args[1])._size?$(call_args[1])._size[($(call_args[2]))-1]:$(call_args[1]).length)"
+                end
             end
 
             # ─── Parsing (by name) ───
@@ -1265,10 +1306,24 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                     return "[]"
                 end
             end
-            # Array indexing
+            # Array indexing (1D and ND)
             call_args_gr = [compile_value(ctx, a) for a in args[2:end]]
             if length(call_args_gr) == 2
                 return "$(call_args_gr[1])[($(call_args_gr[2])) - 1]"
+            elseif length(call_args_gr) == 3
+                # A[i,j] → column-major
+                return "$(call_args_gr[1])[(($(call_args_gr[3]))-1)*$(call_args_gr[1])._size[0]+(($(call_args_gr[2]))-1)]"
+            end
+        end
+
+        # Base.setindex! — array assignment (1D and ND)
+        if bname === :setindex! && callee.mod === Base
+            call_args_gr = [compile_value(ctx, a) for a in args[2:end]]
+            if length(call_args_gr) == 4
+                # A[i,j] = val → column-major
+                return "($(call_args_gr[1])[(($(call_args_gr[4]))-1)*$(call_args_gr[1])._size[0]+(($(call_args_gr[3]))-1)] = $(call_args_gr[2]))"
+            elseif length(call_args_gr) == 3
+                return "($(call_args_gr[1])[($(call_args_gr[3]))-1] = $(call_args_gr[2]))"
             end
         end
 
@@ -1677,8 +1732,15 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
             elseif func_name == "setindex!"
                 arr_val = compile_value(ctx, expr.args[3])
                 val_val = compile_value(ctx, expr.args[4])
-                idx_val = compile_value(ctx, expr.args[5])
-                return "($(arr_val)[($(idx_val))-1] = $(val_val))"
+                if length(expr.args) == 6
+                    # A[i,j] = val → column-major
+                    i_val = compile_value(ctx, expr.args[5])
+                    j_val = compile_value(ctx, expr.args[6])
+                    return "($(arr_val)[(($(j_val))-1)*$(arr_val)._size[0]+(($(i_val))-1)] = $(val_val))"
+                else
+                    idx_val = compile_value(ctx, expr.args[5])
+                    return "($(arr_val)[($(idx_val))-1] = $(val_val))"
+                end
             elseif func_name == "deleteat!"
                 arr_val = compile_value(ctx, expr.args[3])
                 idx_val = compile_value(ctx, expr.args[4])
@@ -1823,6 +1885,15 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
     # isempty(collection) → collection.length === 0
     if func_name == "isempty" && length(call_args) >= 1
         return "$(call_args[1]).length === 0"
+    end
+
+    # size(A) → shape tuple, size(A, d) → dimension size
+    if func_name == "size"
+        if length(call_args) == 1
+            return "($(call_args[1])._size||[$(call_args[1]).length]).slice()"
+        elseif length(call_args) == 2
+            return "($(call_args[1])._size?$(call_args[1])._size[($(call_args[2]))-1]:$(call_args[1]).length)"
+        end
     end
 
     # convert(T, x) → just x (type conversions are compile-time in JS)

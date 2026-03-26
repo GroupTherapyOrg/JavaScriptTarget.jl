@@ -218,6 +218,15 @@ function jl_objectid(x) {
   if (id === undefined) { id = ++_jl_oid_ctr; _jl_oid_map.set(x, id); }
   return id;
 }""",
+
+    :jl_ndarray => """
+function jl_ndarray(fill_val, dims) {
+  var n = 1;
+  for (var i = 0; i < dims.length; i++) n *= dims[i];
+  var a = new Array(n).fill(fill_val);
+  a._size = dims.slice();
+  return a;
+}""",
 )
 
 # Dependency-ordered list of symbols for deterministic output
@@ -230,6 +239,7 @@ const RUNTIME_ORDER = [
     :jl_checked_add, :jl_checked_sub, :jl_checked_mul,
     :jl_println, :jl_print,
     :jl_objectid,
+    :jl_ndarray,
 ]
 
 """
