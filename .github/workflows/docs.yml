@@ -26,32 +26,23 @@ jobs:
         with:
           version: '1.12'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: julia-actions/cache@v2
 
-      - name: Install Julia dependencies
+      - name: Install dependencies
         run: |
           julia --project=docs -e '
             using Pkg
-            Pkg.develop(PackageSpec(path="."))
+            Pkg.resolve()
             Pkg.instantiate()
           '
 
-      - name: Build playground CodeMirror bundle
-        run: |
-          if [ -f playground/cm-bundle/package.json ]; then
-            cd playground/cm-bundle
-            npm ci
-            npx esbuild entry-global.js --bundle --format=iife --outfile=cm-julia.js --minify
-          fi
-
       - name: Build docs
-        env:
-          CI: "true"
         run: |
-          julia --project=docs docs/make.jl
+          julia --project=docs docs/app.jl build
+
+      - name: Copy playground to dist
+        run: |
+          cp -r docs/src/playground docs/dist/playground
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -59,7 +50,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/build
+          path: docs/dist
 
   deploy:
     environment:

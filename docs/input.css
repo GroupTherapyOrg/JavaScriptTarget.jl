@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@source "./src/**/*.jl";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Optima', 'Palatino Linotype', 'Book Antiqua', 'EB Garamond', serif;
+  --font-serif: 'EB Garamond', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+  --font-mono: 'JuliaMono', 'Fira Code', 'JetBrains Mono', monospace;
+
+  /* Warm neutral palette (shared across GroupTherapyOrg ecosystem) */
+  --color-warm-50: #f8f7f4;
+  --color-warm-100: #f0ece4;
+  --color-warm-200: #e8e3d9;
+  --color-warm-300: #d4d0c8;
+  --color-warm-400: #9a9590;
+  --color-warm-500: #8a8680;
+  --color-warm-600: #6b6560;
+  --color-warm-700: #5a5855;
+  --color-warm-800: #2a2520;
+  --color-warm-900: #1a1918;
+  --color-warm-950: #111110;
+
+  /* Accent palette — Julia Purple #9558b2 (JST primary accent) */
+  --color-accent-50: #f6f0fa;
+  --color-accent-100: #ead8f2;
+  --color-accent-200: #d5b1e5;
+  --color-accent-300: #bf8ad8;
+  --color-accent-400: #a96bc5;
+  --color-accent-500: #9558b2;
+  --color-accent-600: #7a4893;
+  --color-accent-700: #5f3873;
+  --color-accent-800: #462a55;
+  --color-accent-900: #2e1b38;
+  --color-accent-950: #1a1022;
+
+  /* Accent-secondary palette — Julia Blue #4063d8 */
+  --color-accent-secondary-50: #eef2fc;
+  --color-accent-secondary-100: #d5def7;
+  --color-accent-secondary-200: #aabdef;
+  --color-accent-secondary-300: #7f9ce6;
+  --color-accent-secondary-400: #597edf;
+  --color-accent-secondary-500: #4063d8;
+  --color-accent-secondary-600: #3350b0;
+  --color-accent-secondary-700: #283e88;
+  --color-accent-secondary-800: #1e2f64;
+  --color-accent-secondary-900: #141f42;
+  --color-accent-secondary-950: #0c1329;
+
+  --radius: 0.5rem;
+}
+
+@layer base {
+  button { cursor: pointer; }
+  therapy-island { display: contents; }
+
+  #page-content h1:not(.no-rule) { padding-top: 1.5rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--color-warm-200); margin-bottom: 1rem; }
+  #page-content h2 { padding-top: 1.25rem; padding-bottom: 0.375rem; border-bottom: 1px solid var(--color-warm-200); margin-bottom: 0.75rem; }
+  #page-content h3 { padding-top: 1rem; padding-bottom: 0.25rem; border-bottom: 1px solid var(--color-warm-100); margin-bottom: 0.5rem; }
+  .dark #page-content h1:not(.no-rule), .dark #page-content h2 { border-bottom-color: var(--color-warm-800); }
+  .dark #page-content h3 { border-bottom-color: var(--color-warm-900); }
+
+  :root {
+    --julia-red: #cb3c33;
+    --julia-purple: #9558b2;
+    --julia-blue: #4063d8;
+    --julia-green: #389826;
+    --accent: var(--julia-purple);
+    --accent-secondary: var(--julia-blue);
+    /* .jl wordmark: exclude Purple (the active accent) */
+    --jl-dot: #389826;
+    --jl-j: #4063d8;
+    --jl-l: #cb3c33;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    background-color: var(--bg-primary);
+  }
+  pre code {
+    font-family: 'JuliaMono', 'Fira Code', 'JetBrains Mono', monospace;
+  }
+}
