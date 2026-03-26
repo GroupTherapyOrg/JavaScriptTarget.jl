@@ -859,6 +859,19 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 return ""
             end
 
+            # Type conversions: Int32(x) → (x)|0, Float64(x) → +(x), etc.
+            if resolved_fn isa Type && length(call_args) == 1
+                if resolved_fn === Int32 || resolved_fn === Int64 || resolved_fn === UInt32
+                    return "($(call_args[1]))|0"
+                elseif resolved_fn === Float64 || resolved_fn === Float32
+                    return "+($(call_args[1]))"
+                elseif resolved_fn === Bool
+                    return "!!($(call_args[1]))"
+                elseif resolved_fn === String
+                    return "String($(call_args[1]))"
+                end
+            end
+
             # Check package registry for positional calls (functions AND type constructors)
             if resolved_fn isa Function || resolved_fn isa Type
                 fn_mod = parentmodule(resolved_fn)
@@ -1016,6 +1029,26 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             end
             if resolved_fn === Base.:(/) && length(call_args) == 2
                 return "($(call_args[1]) / $(call_args[2]))"
+            end
+
+            # Comparison operators (unoptimized IR keeps these as calls)
+            if resolved_fn === Base.:(==) && length(call_args) == 2
+                return "$(call_args[1]) === $(call_args[2])"
+            end
+            if resolved_fn === Base.:(!=) && length(call_args) == 2
+                return "$(call_args[1]) !== $(call_args[2])"
+            end
+            if resolved_fn === Base.:(<) && length(call_args) == 2
+                return "$(call_args[1]) < $(call_args[2])"
+            end
+            if resolved_fn === Base.:(<=) && length(call_args) == 2
+                return "$(call_args[1]) <= $(call_args[2])"
+            end
+            if resolved_fn === Base.:(>) && length(call_args) == 2
+                return "$(call_args[1]) > $(call_args[2])"
+            end
+            if resolved_fn === Base.:(>=) && length(call_args) == 2
+                return "$(call_args[1]) >= $(call_args[2])"
             end
 
             # js() escape hatch
@@ -1203,13 +1236,20 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                     arr_js = pos_args[1]
                     by_js = get(kwargs, :by, nothing)
                     rev = get(kwargs, :rev, nothing)
-                    is_rev = rev !== nothing && rev != "false"
+                    # Determine if rev is a static literal or a dynamic expression
+                    is_static_true = rev == "true"
+                    is_static_false = rev === nothing || rev == "false"
                     if by_js !== nothing
-                        cmp = is_rev ?
-                            "(function(a,b){var _a=$(by_js)(a),_b=$(by_js)(b);return _a<_b?1:_a>_b?-1:0})" :
-                            "(function(a,b){var _a=$(by_js)(a),_b=$(by_js)(b);return _a<_b?-1:_a>_b?1:0})"
+                        if is_static_true
+                            cmp = "(function(a,b){var _a=$(by_js)(a),_b=$(by_js)(b);return _a<_b?1:_a>_b?-1:0})"
+                        elseif is_static_false
+                            cmp = "(function(a,b){var _a=$(by_js)(a),_b=$(by_js)(b);return _a<_b?-1:_a>_b?1:0})"
+                        else
+                            # Dynamic rev: emit comparator that checks rev at runtime
+                            cmp = "(function(a,b){var _a=$(by_js)(a),_b=$(by_js)(b),_d=_a<_b?-1:_a>_b?1:0;return $(rev)?-_d:_d})"
+                        end
                         return "$(arr_js).slice().sort($(cmp))"
-                    elseif is_rev
+                    elseif is_static_true || (!is_static_false && rev !== nothing)
                         return "$(arr_js).slice().sort().reverse()"
                     else
                         return "$(arr_js).slice().sort()"
@@ -1409,8 +1449,22 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             try getfield(type_arg.mod, type_arg.name) catch; nothing end
         elseif type_arg isa Type || type_arg isa DataType
             type_arg
+        elseif type_arg isa Core.SSAValue
+            # In optimize=false IR, types may be SSAValues (e.g. apply_type results)
+            stype = try ctx.code_info.ssavaluetypes[type_arg.id] catch; nothing end
+            if stype isa Core.Const
+                stype.val
+            elseif stype isa DataType
+                stype
+            else
+                nothing
+            end
         else
             nothing
+        end
+        # Unresolvable type: Julia already type-checks at compile time, so isa is always true
+        if T === nothing
+            return "true"
         end
         if T === Nothing
             return "$(x_val) === null"
@@ -1595,6 +1649,47 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         if resolved isa Core.IntrinsicFunction
             return compile_intrinsic(ctx, :not_int, args[2:end])
         end
+    end
+
+    # Handle Base arithmetic and comparison operators (unoptimized IR)
+    if callee isa GlobalRef && callee.mod === Base && length(args) >= 3
+        op = callee.name
+        a_js = compile_value(ctx, args[2])
+        b_js = compile_value(ctx, args[3])
+        if op === :(==)
+            return "$(a_js) === $(b_js)"
+        elseif op === :(!=)
+            return "$(a_js) !== $(b_js)"
+        elseif op === :(<)
+            return "$(a_js) < $(b_js)"
+        elseif op === :(<=)
+            return "$(a_js) <= $(b_js)"
+        elseif op === :(>)
+            return "$(a_js) > $(b_js)"
+        elseif op === :(>=)
+            return "$(a_js) >= $(b_js)"
+        elseif op === :(+)
+            return "($(a_js) + $(b_js))"
+        elseif op === :(-)
+            return "($(a_js) - $(b_js))"
+        elseif op === :(*)
+            return "($(a_js) * $(b_js))"
+        elseif op === :(/)
+            return "($(a_js) / $(b_js))"
+        elseif op === :(%)  || op === :rem
+            return "($(a_js) % $(b_js))"
+        end
+    end
+
+    # Handle unary negation: Base.:(-)(x) → -(x)
+    if callee isa GlobalRef && callee.mod === Base && callee.name === :(-) && length(args) == 2
+        a_js = compile_value(ctx, args[2])
+        return "(-($(a_js)))"
+    end
+
+    # Suppress _typeof_captured_variable — IR artifact, no-op in JS
+    if callee isa GlobalRef && callee.name === :_typeof_captured_variable
+        return "undefined"
     end
 
     # Generic call — will be expanded later
@@ -2001,11 +2096,22 @@ function compile_new_expr(ctx::JSCompilationContext, expr::Expr)
     T_ref = expr.args[1]
     field_args = expr.args[2:end]
 
-    # Resolve type: could be a DataType, GlobalRef, or Argument
+    # Resolve type: could be a DataType, GlobalRef, SSAValue, or Argument
     T = if T_ref isa DataType
         T_ref
     elseif T_ref isa GlobalRef
         try getfield(T_ref.mod, T_ref.name) catch; nothing end
+    elseif T_ref isa Core.SSAValue
+        # In optimize=false IR, closure types may be SSAValues
+        # e.g. %5 = Main.:(var"#fn##0#fn##1")::Core.Const(ClosureType)
+        ssa_type = try ctx.code_info.ssavaluetypes[T_ref.id] catch; nothing end
+        if ssa_type isa Core.Const
+            ssa_type.val
+        elseif ssa_type isa DataType
+            ssa_type
+        else
+            nothing
+        end
     elseif T_ref isa Core.Argument
         # In constructors, Argument(1) is the type — get from arg_types context
         nothing  # Can't resolve at compile time from within the constructor
@@ -2059,8 +2165,9 @@ function compile_closure_creation(ctx::JSCompilationContext, T::DataType, captur
     # Get the non-self parameter types from the method signature
     param_types = m.sig.parameters[2:end]
 
-    # Get typed IR (use code_typed_by_type since code_typed(Method, ...) may return empty)
-    ci, rt = Base.code_typed_by_type(Tuple{T, param_types...}; optimize=true)[1]
+    # Get typed IR — use optimize=false to preserve high-level operations
+    # (e.g. lowercase → .toLowerCase() instead of broken .map(lowercase))
+    ci, rt = Base.code_typed_by_type(Tuple{T, param_types...}; optimize=false)[1]
 
     # Build argument names for the closure (skip #self# at slot 1)
     nargs = length(param_types)
