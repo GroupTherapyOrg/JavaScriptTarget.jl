@@ -2927,7 +2927,7 @@ process.stdout.write(String(f_isempty("hello")));
 
         # --- Test 2: HTML playground page exists ---
         @testset "Playground HTML exists" begin
-            html_path = joinpath(@__DIR__, "..", "docs", "playground", "index.html")
+            html_path = joinpath(@__DIR__, "..", "docs", "src", "playground", "index.html")
             @test isfile(html_path)
             html = read(html_path, String)
             @test occursin("CodeMirror", html)
@@ -3174,7 +3174,7 @@ process.stdout.write(String(f_isempty("hello")));
 
         # --- Test 17: Playground page has required elements ---
         @testset "Playground HTML elements" begin
-            html_path = joinpath(@__DIR__, "..", "docs", "playground", "index.html")
+            html_path = joinpath(@__DIR__, "..", "docs", "src", "playground", "index.html")
             html = read(html_path, String)
             @test occursin("id=\"editor-wrap\"", html)
             @test occursin("id=\"output\"", html)
@@ -3381,47 +3381,43 @@ process.stdout.write(String(f_isempty("hello")));
     end
 
     # ==============================================================
-    # DOC-001: Documenter.jl site
+    # DOC-001: Therapy.jl-powered docs site
     # ==============================================================
 
-    @testset "DOC-001: Documenter.jl site" begin
+    @testset "DOC-001: Therapy.jl docs site" begin
         docs_dir = joinpath(@__DIR__, "..", "docs")
 
-        @testset "docs/make.jl exists" begin
-            @test isfile(joinpath(docs_dir, "make.jl"))
+        @testset "docs/app.jl exists" begin
+            @test isfile(joinpath(docs_dir, "app.jl"))
         end
 
-        @testset "docs/Project.toml exists" begin
+        @testset "docs/Project.toml has Therapy" begin
             @test isfile(joinpath(docs_dir, "Project.toml"))
             content = read(joinpath(docs_dir, "Project.toml"), String)
-            @test occursin("Documenter", content)
+            @test occursin("Therapy", content)
         end
 
-        @testset "docs/src pages exist" begin
-            src = joinpath(docs_dir, "src")
-            @test isfile(joinpath(src, "index.md"))
-            @test isfile(joinpath(src, "getting_started.md"))
-            @test isfile(joinpath(src, "api.md"))
-            @test isfile(joinpath(src, "supported_functions.md"))
-            @test isfile(joinpath(src, "architecture.md"))
+        @testset "docs/src routes exist" begin
+            @test isfile(joinpath(docs_dir, "src", "routes", "index.jl"))
+            @test isfile(joinpath(docs_dir, "src", "routes", "getting-started.jl"))
+            @test isfile(joinpath(docs_dir, "src", "routes", "api", "index.jl"))
         end
 
-        @testset "index.md has playground embed" begin
-            content = read(joinpath(docs_dir, "src", "index.md"), String)
+        @testset "docs/src components exist" begin
+            @test isfile(joinpath(docs_dir, "src", "components", "Layout.jl"))
+        end
+
+        @testset "playground files exist" begin
+            pg = joinpath(docs_dir, "src", "playground")
+            @test isfile(joinpath(pg, "index.html"))
+            @test isfile(joinpath(pg, "codegen.js"))
+            @test isfile(joinpath(pg, "parser.js"))
+        end
+
+        @testset "homepage has playground iframe" begin
+            content = read(joinpath(docs_dir, "src", "routes", "index.jl"), String)
             @test occursin("playground", content)
             @test occursin("iframe", content)
-        end
-
-        @testset "api.md has @docs blocks" begin
-            content = read(joinpath(docs_dir, "src", "api.md"), String)
-            @test occursin("compile", content)
-            @test occursin("compile_module", content)
-            @test occursin("JSOutput", content)
-            @test occursin("build_playground", content)
-        end
-
-        @testset "playground embed CSS exists" begin
-            @test isfile(joinpath(docs_dir, "src", "assets", "playground-embed.css"))
         end
     end
 
