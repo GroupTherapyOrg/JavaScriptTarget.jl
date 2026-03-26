@@ -22,7 +22,7 @@ function build_playground(output_dir::String; verbose::Bool=false, bundle::Bool=
     mkpath(output_dir)
 
     playground_src = joinpath(@__DIR__)
-    docs_playground = joinpath(@__DIR__, "..", "..", "docs", "playground")
+    docs_playground = joinpath(@__DIR__, "..", "..", "docs", "src", "playground")
 
     # --- Step 1: Copy JS pipeline files ---
     js_files = ["parser.js", "lowerer.js", "infer.js", "codegen.js", "runtime.js", "worker.js"]
