@@ -7,7 +7,7 @@
 Pkg.add(url="https://github.com/GroupTherapyOrg/JavaScriptTarget.jl")""")),
 
         H2(:class => "text-xl font-semibold text-warm-800 dark:text-warm-200", "Basic Usage"),
-        P(:class => "text-warm-600 dark:text-warm-400", "Write a Julia function with typed arguments, then compile it to JavaScript:"),
+        P(:class => "text-warm-600 dark:text-warm-400", "Write a Julia function with typed arguments, then transpile it to JavaScript:"),
         Pre(:class => "bg-warm-900 dark:bg-warm-950 p-4 rounded border border-warm-800", Code(:class => "language-julia", """using JavaScriptTarget
 
 # Define a Julia function with typed arguments
@@ -15,7 +15,7 @@ function add(a::Int32, b::Int32)::Int32
     return a + b
 end
 
-# Compile to JavaScript
+# Transpile to JavaScript
 result = compile(add, (Int32, Int32))
 println(result.js)
 # Output: function add(a, b) { return (a + b) | 0; }""")),
@@ -65,6 +65,6 @@ println(result.js)
         Span(count)
     )
 end
-# → Compiles to ~500 bytes of inline JavaScript"""))
+# → Transpiles to ~500 bytes of inline JavaScript"""))
     )
 end

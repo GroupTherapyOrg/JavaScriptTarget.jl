@@ -10,7 +10,7 @@
         Div(:class => "space-y-4",
             Div(:class => card,
                 H3(:class => "font-mono font-semibold text-warm-900 dark:text-warm-100", "compile(f, arg_types; kwargs...)"),
-                P(:class => "text-sm text-warm-600 dark:text-warm-400", "Compile a Julia function to JavaScript. Returns a ", Code(:class => "text-accent-500", "JSOutput"), " with the JS code, TypeScript declarations, and exports."),
+                P(:class => "text-sm text-warm-600 dark:text-warm-400", "Transpile a Julia function to JavaScript. Returns a ", Code(:class => "text-accent-500", "JSOutput"), " with the JS code, TypeScript declarations, and exports."),
                 Pre(:class => code_block, Code(:class => "language-julia", """result = compile(sin, (Float64,))
 println(result.js)       # JavaScript code
 println(result.exports)  # ["sin"]"""))),

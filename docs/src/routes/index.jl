@@ -6,11 +6,11 @@
                 "Julia → JavaScript"
             ),
             H1(:class => "no-rule text-5xl md:text-6xl font-serif font-bold text-accent-500",
-                "Compiler"
+                "Transpiler"
             ),
             P(:class => "text-lg text-warm-600 dark:text-warm-400 max-w-2xl mx-auto leading-relaxed",
-                "Compile Julia functions to JavaScript via typed IR. ",
-                "Arrays, strings, math, closures, structs — all compile to clean, efficient JS."
+                "Transpile Julia functions to JavaScript via typed IR. ",
+                "Arrays, strings, math, closures, structs — all transpile to clean, efficient JS."
             ),
             Div(:class => "flex gap-4 justify-center pt-4",
                 A(:href => "./getting-started/",
@@ -44,7 +44,7 @@ println(result.js)  # Clean JS output""")
         # Live Playground
         Div(:class => "space-y-4",
             H2(:class => "text-xl font-semibold text-warm-800 dark:text-warm-200 text-center", "Try it Live"),
-            P(:class => "text-sm text-warm-600 dark:text-warm-400 text-center", "Write Julia in the left panel — see compiled JavaScript on the right. Runs entirely in your browser."),
+            P(:class => "text-sm text-warm-600 dark:text-warm-400 text-center", "Write Julia in the left panel — see transpiled JavaScript on the right. Runs entirely in your browser."),
             Div(:class => "w-full rounded-lg overflow-hidden border border-warm-200 dark:border-warm-800",
                 RawHtml("""<iframe src="./playground/index.html" style="width:100%;height:500px;border:none;" title="JST Playground"></iframe>""")
             )

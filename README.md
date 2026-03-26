@@ -2,7 +2,7 @@
 
 # JavaScriptTarget.jl
 
-Compile Julia functions to JavaScript.
+Julia-to-JavaScript transpiler.
 
 [![CI](https://github.com/GroupTherapyOrg/JavaScriptTarget.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/GroupTherapyOrg/JavaScriptTarget.jl/actions/workflows/ci.yml)
 [![Docs](https://github.com/GroupTherapyOrg/JavaScriptTarget.jl/actions/workflows/docs.yml/badge.svg)](https://grouptherapyorg.github.io/JavaScriptTarget.jl/)
@@ -24,7 +24,7 @@ println(result.js)
 
 Includes a self-hosted [browser playground](https://grouptherapyorg.github.io/JavaScriptTarget.jl/) — type Julia, run it as JS, no server needed.
 
-## What Compiles
+## What Transpiles
 
 | Julia | JavaScript |
 |---|---|
@@ -72,7 +72,7 @@ JST auto-detects when `optimize=false` is needed (when the optimized IR contains
 
 ## Package Compilation Registry
 
-JST can compile calls to registered Julia packages into their JavaScript equivalents — instead of compiling the package's internal implementation.
+JST can transpile calls to registered Julia packages into their JavaScript equivalents — instead of transpiling the package's internal implementation.
 
 ### Registering a Package
 
@@ -150,7 +150,7 @@ js("console.log('value:', \$1)", my_value)  # $1 substituted with compiled expre
 
 ## Related
 
-- [Therapy.jl](https://github.com/GroupTherapyOrg/Therapy.jl) — Signals-based web framework using JST for compilation
+- [Therapy.jl](https://github.com/GroupTherapyOrg/Therapy.jl) — Signals-based web framework using JST for transpilation
 - [Sessions.jl](https://github.com/GroupTherapyOrg/Sessions.jl) — Notebook IDE with JST-powered export
 
 ## License
