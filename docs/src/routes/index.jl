@@ -44,9 +44,22 @@ println(result.js)  # Clean JS output""")
         # Live Playground
         Div(:class => "space-y-4",
             H2(:class => "text-xl font-semibold text-warm-800 dark:text-warm-200 text-center", "Try it Live"),
-            P(:class => "text-sm text-warm-600 dark:text-warm-400 text-center", "Write Julia in the left panel — see transpiled JavaScript on the right. Runs entirely in your browser."),
-            Div(:class => "w-full rounded-lg overflow-hidden border border-warm-200 dark:border-warm-800",
-                RawHtml("""<iframe src="./playground/index.html" style="width:100%;height:500px;border:none;" title="JST Playground"></iframe>""")
+            P(:class => "text-sm text-warm-600 dark:text-warm-400 text-center",
+                "Write Julia on the left — see transpiled JavaScript on the right. Runs entirely in your browser."),
+            # Warning: browser playground vs full JST
+            Div(:class => "mx-auto max-w-3xl px-4 py-3 rounded-lg border border-accent-300 dark:border-accent-700 bg-accent-50 dark:bg-accent-950/30 text-sm text-warm-700 dark:text-warm-300",
+                P(
+                    Strong(:class => "text-accent-600 dark:text-accent-400", "Note: "),
+                    "This is a lightweight browser-only playground with a subset of JST's capabilities. ",
+                    "The full ", Code(:class => "text-accent-500", "JavaScriptTarget.jl"),
+                    " package runs in Julia and supports the complete transpilation pipeline — arrays, broadcasting, structs, closures, package registry, and ",
+                    A(:href => "./api/", :class => "text-accent-500 hover:text-accent-600 underline", "50+ Julia operations"),
+                    ". See the ", A(:href => "./getting-started/", :class => "text-accent-500 hover:text-accent-600 underline", "Getting Started"),
+                    " guide to use the full transpiler."
+                )
+            ),
+            Div(:class => "w-full rounded-xl overflow-hidden border-2 border-warm-300 dark:border-warm-700 shadow-lg",
+                RawHtml("""<iframe src="./playground/index.html" style="width:100%;height:480px;border:none;border-radius:0.75rem;" title="JST Playground"></iframe>""")
             )
         ),
 
