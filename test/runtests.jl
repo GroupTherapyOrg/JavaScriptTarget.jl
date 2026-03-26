@@ -3424,4 +3424,99 @@ process.stdout.write(String(f_isempty("hello")));
             @test isfile(joinpath(docs_dir, "src", "assets", "playground-embed.css"))
         end
     end
+
+    # ─── New operations: e2e tests via Node.js ───
+    # Compiles Julia → JS (unoptimized IR) → runs in Node → compares output.
+    # Uses unoptimized IR because Julia's optimizer inlines these operations.
+    # Therapy's _get_ir_with_fallback also uses optimize=false for array code.
+
+    import JavaScriptTarget as JST
+
+    # Helper: compile with unoptimized IR and run in Node.js
+    function compile_unopt_and_run(fn, args_js::String)
+        ci, rt = JST.get_typed_ir(fn, (); optimize=false)
+        ctx = JST.JSCompilationContext(ci, (), rt, "test_fn")
+        func_js = JST.compile_function(ctx)
+        runtime_js = JST.get_runtime_code(ctx.required_runtime)
+        test_code = """
+$(runtime_js)
+$(func_js)
+var r = test_fn($(args_js));
+process.stdout.write(JSON.stringify(r));
+"""
+        return run_js(test_code)
+    end
+
+    @testset "Intrinsics: gt/ge (e2e Node)" begin
+        f_gt(a::Int32, b::Int32) = a > b
+        f_ge(a::Int32, b::Int32) = a >= b
+        @test compile_and_run(f_gt, (Int32, Int32), Int32(5), Int32(3)) == "true"
+        @test compile_and_run(f_gt, (Int32, Int32), Int32(3), Int32(5)) == "false"
+        @test compile_and_run(f_ge, (Int32, Int32), Int32(5), Int32(5)) == "true"
+        @test compile_and_run(f_ge, (Int32, Int32), Int32(3), Int32(5)) == "false"
+    end
+
+    @testset "Math: e2e Node" begin
+        f_sin(x::Float64) = sin(x)
+        f_sqrt(x::Float64) = sqrt(x)
+        f_abs(x::Float64) = abs(x)
+        f_floor(x::Float64) = floor(x)
+        @test compile_and_run(f_sin, (Float64,), 0.0) == "0"
+        @test compile_and_run(f_sqrt, (Float64,), 4.0) == "2"
+        @test compile_and_run(f_abs, (Float64,), -3.0) == "3"
+        @test compile_and_run(f_floor, (Float64,), 3.7) == "3"
+    end
+
+    @testset "String: lowercase (e2e Node)" begin
+        fn = () -> lowercase("HELLO")
+        @test compile_unopt_and_run(fn, "") == "\"hello\""
+    end
+
+    @testset "String: uppercase (e2e Node)" begin
+        fn = () -> uppercase("hello")
+        @test compile_unopt_and_run(fn, "") == "\"HELLO\""
+    end
+
+    @testset "Array: sort (e2e Node)" begin
+        fn = () -> sort([3, 1, 2])
+        @test compile_unopt_and_run(fn, "") == "[1,2,3]"
+    end
+
+    # map/filter with closures need Therapy's full closure compilation context
+    # (captured_vars, callable_overrides). They work in Therapy's pipeline but
+    # standalone JST compile_function doesn't have this context.
+    # Tested via IR pattern matching instead of e2e Node execution:
+    @testset "Array: map (IR pattern)" begin
+        fn = () -> map(x -> x * 2, [1, 2, 3])
+        ci, rt = JST.get_typed_ir(fn, (); optimize=false)
+        ctx = JST.JSCompilationContext(ci, (), rt, "t")
+        @test occursin(".map(", JST.compile_function(ctx))
+    end
+
+    @testset "Array: filter (IR pattern)" begin
+        fn = () -> filter(x -> x > 1, [1, 2, 3])
+        ci, rt = JST.get_typed_ir(fn, (); optimize=false)
+        ctx = JST.JSCompilationContext(ci, (), rt, "t")
+        @test occursin(".filter(", JST.compile_function(ctx))
+    end
+
+    @testset "Array: reverse (e2e Node)" begin
+        fn = () -> reverse([1, 2, 3])
+        @test compile_unopt_and_run(fn, "") == "[3,2,1]"
+    end
+
+    @testset "Array: copy (e2e Node)" begin
+        fn = () -> copy([10, 20, 30])
+        @test compile_unopt_and_run(fn, "") == "[10,20,30]"
+    end
+
+    @testset "String: contains (e2e Node)" begin
+        fn = () -> contains("hello world", "world")
+        @test compile_unopt_and_run(fn, "") == "true"
+    end
+
+    @testset "String: startswith (e2e Node)" begin
+        fn = () -> startswith("hello", "he")
+        @test compile_unopt_and_run(fn, "") == "true"
+    end
 end

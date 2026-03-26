@@ -838,6 +838,7 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             if resolved_fn === Base.getproperty && length(args) >= 3
                 mod_arg = args[2]
                 field_arg = args[3]
+                # Check if first arg is a Module and second is a QuoteNode(:name)
                 mod_val = nothing
                 if mod_arg isa GlobalRef
                     mod_val = try getfield(mod_arg.mod, mod_arg.name) catch; nothing end
@@ -848,6 +849,7 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                     end
                 end
                 if mod_val isa Module
+                    # Suppress — the result will be used as a callee and matched by package registry
                     return ""
                 end
             end
@@ -874,7 +876,17 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                     end
                 end
                 # Array indexing: arr[i] → arr[i-1]
+                # Range indexing: arr[a:b] → arr.slice(a-1, b)
                 if length(call_args) == 2
+                    idx_arg = args[3]  # The index argument (before compilation)
+                    idx_type = nothing
+                    if idx_arg isa Core.SSAValue
+                        idx_type = try ctx.code_info.ssavaluetypes[idx_arg.id] catch; nothing end
+                    end
+                    # Check if index is a range (UnitRange) → slice
+                    if idx_type !== nothing && idx_type isa DataType && idx_type <: AbstractRange
+                        return "$(call_args[1]).slice(($(call_args[2])).start-1,($(call_args[2])).stop)"
+                    end
                     return "$(call_args[1])[($(call_args[2])) - 1]"
                 end
                 return "[]"
@@ -984,6 +996,92 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 end
             end
 
+            # ─── String operations (by name) ───
+            if fn_name == "lowercase"
+                return "$(call_args[1]).toLowerCase()"
+            end
+            if fn_name == "uppercase"
+                return "$(call_args[1]).toUpperCase()"
+            end
+            if fn_name == "strip"
+                return "$(call_args[1]).trim()"
+            end
+            if fn_name == "contains" && length(call_args) >= 2
+                # Julia: contains(haystack, needle) → haystack.includes(needle)
+                return "$(call_args[1]).includes($(call_args[2]))"
+            end
+            if fn_name == "occursin" && length(call_args) >= 2
+                # Julia: occursin(needle, haystack) → haystack.includes(needle)
+                return "$(call_args[2]).includes($(call_args[1]))"
+            end
+            if fn_name == "startswith" && length(call_args) >= 2
+                return "$(call_args[1]).startsWith($(call_args[2]))"
+            end
+            if fn_name == "endswith" && length(call_args) >= 2
+                return "$(call_args[1]).endsWith($(call_args[2]))"
+            end
+            if fn_name == "split" && length(call_args) >= 2
+                return "$(call_args[1]).split($(call_args[2]))"
+            end
+            if fn_name == "join" && length(call_args) >= 2
+                return "$(call_args[1]).join($(call_args[2]))"
+            end
+
+            # ─── Array operations (by name) ───
+            if fn_name == "sort" && length(call_args) >= 1
+                return "$(call_args[1]).slice().sort()"
+            end
+            if fn_name == "copy" && length(call_args) >= 1
+                return "$(call_args[1]).slice()"
+            end
+            if fn_name == "reverse" && length(call_args) >= 1
+                return "[...$(call_args[1])].reverse()"
+            end
+
+            # ─── Higher-order (by name) ───
+            if fn_name == "map" && length(call_args) >= 2
+                return "$(call_args[2]).map($(call_args[1]))"
+            end
+            if fn_name == "filter" && length(call_args) >= 2
+                return "$(call_args[2]).filter($(call_args[1]))"
+            end
+            if fn_name == "any" && length(call_args) >= 2
+                return "$(call_args[2]).some($(call_args[1]))"
+            end
+            if fn_name == "all" && length(call_args) >= 2
+                return "$(call_args[2]).every($(call_args[1]))"
+            end
+            if fn_name == "findfirst" && length(call_args) >= 2
+                return "($(call_args[2]).findIndex($(call_args[1]))+1)"
+            end
+            if fn_name == "reduce" && length(call_args) >= 2
+                return "$(call_args[2]).reduce($(call_args[1]))"
+            end
+
+            # ─── Construction (by name) ───
+            if fn_name == "zeros" && length(call_args) >= 1
+                return "new Array($(call_args[1])).fill(0)"
+            end
+            if fn_name == "ones" && length(call_args) >= 1
+                return "new Array($(call_args[1])).fill(1)"
+            end
+            if fn_name == "fill" && length(call_args) >= 2
+                return "new Array($(call_args[2])).fill($(call_args[1]))"
+            end
+
+            # ─── Parsing (by name) ───
+            if fn_name == "parse" && length(call_args) >= 2
+                tp = call_args[1]
+                if contains(tp, "Int"); return "parseInt($(call_args[2]),10)"; end
+                if contains(tp, "Float"); return "parseFloat($(call_args[2]))"; end
+            end
+
+            # IO
+            if fn_name == "println"
+                require_runtime!(ctx, :jl_println)
+                return "jl_println($(join(call_args, ", ")))"
+            end
+
             # Fallback: emit as function call
             return "$(fn_name)($(join(call_args, ", ")))"
         end
@@ -1015,10 +1113,29 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                 # Check package registry
                 compiler_fn = lookup_package_compilation(fn_mod, fn_name)
                 if compiler_fn !== nothing
-                    # Extract kwargs from NamedTuple construction
                     kwargs = _extract_kwargs(ctx, kwargs_ssa)
                     pos_args = [compile_value(ctx, a) for a in pos_raw]
                     return compiler_fn(ctx, kwargs, pos_args)
+                end
+
+                # sort(arr; by=f, rev=true) → arr.slice().sort(compareFn)
+                if fn === Base.sort || fn_name === :sort
+                    kwargs = _extract_kwargs(ctx, kwargs_ssa)
+                    pos_args = [compile_value(ctx, a) for a in pos_raw]
+                    arr_js = pos_args[1]
+                    by_js = get(kwargs, :by, nothing)
+                    rev = get(kwargs, :rev, nothing)
+                    is_rev = rev !== nothing && rev != "false"
+                    if by_js !== nothing
+                        cmp = is_rev ?
+                            "(function(a,b){var _a=$(by_js)(a),_b=$(by_js)(b);return _a<_b?1:_a>_b?-1:0})" :
+                            "(function(a,b){var _a=$(by_js)(a),_b=$(by_js)(b);return _a<_b?-1:_a>_b?1:0})"
+                        return "$(arr_js).slice().sort($(cmp))"
+                    elseif is_rev
+                        return "$(arr_js).slice().sort().reverse()"
+                    else
+                        return "$(arr_js).slice().sort()"
+                    end
                 end
             end
         end
@@ -1111,6 +1228,8 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         end
 
         # Base.getproperty(Module, :name) → suppress (module field access in unoptimized IR)
+        # e.g., PlotlyBase.scatter becomes getproperty(PlotlyBase, :scatter)
+        # The result is used as a callee in a subsequent call, which the package registry handles.
         if bname === :getproperty && callee.mod === Base && length(args) >= 3
             mod_arg = args[2]
             mod_val = nothing
@@ -1417,8 +1536,10 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
                 override_fn = ctx.callable_overrides[receiver_type]
                 receiver_js = compile_value(ctx, expr.args[2])
 
-                # Trace receiver SSA back to defining getfield to resolve correct
-                # captured_vars value (handles multiple same-type signal getters/setters)
+                # Trace receiver SSA back to its defining getfield statement to
+                # resolve the correct captured_vars value. This handles multiple
+                # overrides of the same type (e.g., two SignalSetter{Int} or two
+                # SignalGetter{Int} — each maps to a different signal variable).
                 if !isempty(ctx.captured_vars) && expr.args[2] isa Core.SSAValue
                     recv_ssa_id = expr.args[2].id
                     if recv_ssa_id >= 1 && recv_ssa_id <= length(ctx.code_info.code)
@@ -1547,6 +1668,28 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
             elseif func_name == "empty!"
                 arr_val = compile_value(ctx, expr.args[3])
                 return "($(arr_val).length = 0, $(arr_val))"
+            elseif func_name == "copy"
+                arr_val = compile_value(ctx, expr.args[3])
+                return "$(arr_val).slice()"
+            elseif func_name == "reverse" || func_name == "reverse!"
+                arr_val = compile_value(ctx, expr.args[3])
+                return "[...$(arr_val)].reverse()"
+            elseif func_name == "setindex!"
+                arr_val = compile_value(ctx, expr.args[3])
+                val_val = compile_value(ctx, expr.args[4])
+                idx_val = compile_value(ctx, expr.args[5])
+                return "($(arr_val)[($(idx_val))-1] = $(val_val))"
+            elseif func_name == "deleteat!"
+                arr_val = compile_value(ctx, expr.args[3])
+                idx_val = compile_value(ctx, expr.args[4])
+                return "($(arr_val).splice(($(idx_val))-1, 1), $(arr_val))"
+            elseif func_name == "in" || func_name == "∈"
+                val_val = compile_value(ctx, expr.args[3])
+                arr_val = compile_value(ctx, expr.args[4])
+                return "$(arr_val).includes($(val_val))"
+            elseif func_name == "sort" || func_name == "sort!"
+                arr_val = compile_value(ctx, expr.args[3])
+                return "$(arr_val).slice().sort()"
             end
         end
 
@@ -1685,6 +1828,51 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
     # convert(T, x) → just x (type conversions are compile-time in JS)
     if func_name == "convert" && length(call_args) >= 2
         return call_args[2]
+    end
+
+    # Higher-order array functions: map, filter, any, all, findfirst
+    if func_name == "map" && length(call_args) >= 2
+        return "$(call_args[2]).map($(call_args[1]))"
+    end
+    if func_name == "filter" && length(call_args) >= 2
+        return "$(call_args[2]).filter($(call_args[1]))"
+    end
+    if func_name == "any" && length(call_args) >= 2
+        return "$(call_args[2]).some($(call_args[1]))"
+    end
+    if func_name == "all" && length(call_args) >= 2
+        return "$(call_args[2]).every($(call_args[1]))"
+    end
+    if func_name == "findfirst" && length(call_args) >= 2
+        return "($(call_args[2]).findIndex($(call_args[1]))+1)"
+    end
+    if func_name == "reduce" && length(call_args) >= 2
+        if length(call_args) >= 3
+            return "$(call_args[2]).reduce($(call_args[1]),$(call_args[3]))"
+        end
+        return "$(call_args[2]).reduce($(call_args[1]))"
+    end
+
+    # Array/collection construction
+    if func_name == "zeros" && length(call_args) >= 1
+        return "new Array($(call_args[1])).fill(0)"
+    end
+    if func_name == "ones" && length(call_args) >= 1
+        return "new Array($(call_args[1])).fill(1)"
+    end
+    if func_name == "fill" && length(call_args) >= 2
+        return "new Array($(call_args[2])).fill($(call_args[1]))"
+    end
+
+    # Number parsing
+    if func_name == "parse" && length(call_args) >= 2
+        type_arg = call_args[1]
+        str_arg = call_args[2]
+        if contains(type_arg, "Int")
+            return "parseInt($(str_arg), 10)"
+        elseif contains(type_arg, "Float")
+            return "parseFloat($(str_arg))"
+        end
     end
 
     # Check package compilation registry (for registered functions like sort_for, plotly, etc.)
@@ -1971,6 +2159,10 @@ function compile_intrinsic(ctx::JSCompilationContext, name::Symbol, args::Abstra
         return "$(compiled_args[1]) < $(compiled_args[2])"
     elseif name === :sle_int
         return "$(compiled_args[1]) <= $(compiled_args[2])"
+    elseif name === :sgt_int
+        return "$(compiled_args[1]) > $(compiled_args[2])"
+    elseif name === :sge_int
+        return "$(compiled_args[1]) >= $(compiled_args[2])"
     elseif name === :eq_float
         return "$(compiled_args[1]) === $(compiled_args[2])"
     elseif name === :ne_float
