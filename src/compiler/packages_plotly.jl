@@ -37,17 +37,17 @@ end
 function _plotly_plot_compiler(ctx, kwargs, pos_args)
     # Positional: plotly(divid, traces, layout) OR plot(traces, layout)
     # Detect by checking if first arg looks like a string (divid)
-    el_id = "\"therapy-plot\""
     traces_js = "[]"
     layout_js = "{}"
+    el_expr = nothing  # will use dynamic island-scoped lookup by default
 
     if length(pos_args) >= 3
         # plotly(divid, traces, layout)
-        el_id = pos_args[1]
+        el_expr = "document.getElementById($(pos_args[1]))"
         traces_js = pos_args[2]
         layout_js = pos_args[3]
     elseif length(pos_args) >= 2
-        # plot(traces, layout) or plotly(divid, traces)
+        # plot(traces, layout)
         traces_js = pos_args[1]
         layout_js = pos_args[2]
     elseif length(pos_args) >= 1
@@ -56,10 +56,16 @@ function _plotly_plot_compiler(ctx, kwargs, pos_args)
 
     # Override with kwargs if present
     if haskey(kwargs, :divid)
-        el_id = kwargs[:divid]
+        el_expr = "document.getElementById($(kwargs[:divid]))"
     end
 
-    return "(function() { var _el = document.getElementById($(el_id)); if (_el && typeof Plotly !== 'undefined') { Plotly.react(_el, $(traces_js), $(layout_js), {responsive: true, displayModeBar: false}); } else if (_el) { var _s = document.createElement('script'); _s.src = 'https://cdn.plot.ly/plotly-2.35.2.min.js'; _s.onload = function() { Plotly.newPlot(_el, $(traces_js), $(layout_js), {responsive: true, displayModeBar: false}); }; document.head.appendChild(_s); } }())"
+    # Default: find the plot div dynamically within the island scope
+    # Uses the `island` variable from Therapy's hydration IIFE
+    if el_expr === nothing
+        el_expr = "(typeof island!=='undefined'?island.querySelector('div[id]'):document.getElementById('therapy-plot'))"
+    end
+
+    return "(function() { var _el = $(el_expr); if (_el && typeof Plotly !== 'undefined') { Plotly.react(_el, $(traces_js), $(layout_js), {responsive: true, displayModeBar: false}); } else if (_el) { var _s = document.createElement('script'); _s.src = 'https://cdn.plot.ly/plotly-2.35.2.min.js'; _s.onload = function() { Plotly.newPlot(_el, $(traces_js), $(layout_js), {responsive: true, displayModeBar: false}); }; document.head.appendChild(_s); } }())"
 end
 
 # ─── Registration function (called when a module that has these names is available) ───
