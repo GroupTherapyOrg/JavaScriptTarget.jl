@@ -44,11 +44,11 @@ Includes a self-hosted [browser playground](https://grouptherapyorg.github.io/Ja
 | | `deleteat!` | `.splice(i-1, 1)` |
 | | `sort` (with `by=`, `rev=`) | `.slice().sort(compareFn)` |
 | | `in` / `∈` | `.includes()` |
-| **ND Arrays** | `zeros(m,n)`, `ones(m,n)`, `fill(v,m,n)` | Flat `Array` + `_size` metadata (column-major) |
-| | `A[i,j]`, `A[i,j,k]` | Column-major stride: `A[(j-1)*m+(i-1)]` |
-| | `A[i,j] = val` | Same stride for write |
-| | `size(A)`, `size(A,d)` | `A._size`, `A._size[d-1]` |
-| | `length(A)` (total elements) | `A.length` |
+| **ND Arrays** | `zeros(m,n)`, `ones(m,n)`, `fill(v,m,n)` | Nested `Array` of `Array`: `[[0,0],[0,0]]` |
+| | `A[i,j]`, `A[i,j,k]` | `A[i-1][j-1]`, `A[i-1][j-1][k-1]` |
+| | `A[i,j] = val` | `A[i-1][j-1] = val` |
+| | `size(A)`, `size(A,d)` | `[A.length, A[0].length]`, dimension walk |
+| | `length(A)` | `A.length` (outer dimension) |
 | **Higher-Order** | `map(f, arr)` | `arr.map(f)` |
 | | `filter(f, arr)` | `arr.filter(f)` |
 | | `any(f, arr)`, `all(f, arr)` | `arr.some(f)`, `arr.every(f)` |
@@ -94,7 +94,7 @@ Includes a self-hosted [browser playground](https://grouptherapyorg.github.io/Ja
 | **Parsing** | `parse(Int, s)` | `parseInt(s, 10)` |
 | | `parse(Float64, s)` | `parseFloat(s)` |
 | **Construction** | `zeros(n)`, `ones(n)`, `fill(v,n)` | `new Array(n).fill(...)` |
-| | `zeros(m,n)`, `ones(m,n)`, `fill(v,m,n)` | `jl_ndarray(val, [m,n])` |
+| | `zeros(m,n)`, `ones(m,n)`, `fill(v,m,n)` | `jl_ndarray(val, [m,n])` → nested arrays |
 | **Other** | `isempty(x)` | `x.length === 0` |
 | | `convert(T, x)` | `x` (identity) |
 | | `Float64(x)`, `Int(x)` | `+(x)`, `(x)\|0` |

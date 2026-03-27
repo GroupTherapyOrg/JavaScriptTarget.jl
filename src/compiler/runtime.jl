@@ -221,10 +221,10 @@ function jl_objectid(x) {
 
     :jl_ndarray => """
 function jl_ndarray(fill_val, dims) {
-  var n = 1;
-  for (var i = 0; i < dims.length; i++) n *= dims[i];
-  var a = new Array(n).fill(fill_val);
-  a._size = dims.slice();
+  if (dims.length === 1) return new Array(dims[0]).fill(fill_val);
+  var a = new Array(dims[0]);
+  var rest = dims.slice(1);
+  for (var i = 0; i < dims[0]; i++) a[i] = jl_ndarray(fill_val, rest);
   return a;
 }""",
 )

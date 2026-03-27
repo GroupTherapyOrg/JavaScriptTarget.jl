@@ -34,7 +34,7 @@ println(result.js)
                     Tr(:class => row, Td(:class => jl, "String"), Td(:class => js_col, "string")),
                     Tr(:class => row, Td(:class => jl, "Bool"), Td(:class => js_col, "boolean")),
                     Tr(:class => row, Td(:class => jl, "Vector{T}"), Td(:class => js_col, "Array")),
-                    Tr(:class => row, Td(:class => jl, "Matrix{T} (ND arrays)"), Td(:class => js_col, "Flat Array + _size (column-major)")),
+                    Tr(:class => row, Td(:class => jl, "Matrix{T} (ND arrays)"), Td(:class => js_col, "Nested Array: [[row1], [row2]]")),
                     Tr(:class => row, Td(:class => jl, "Dict{K,V}"), Td(:class => js_col, "Map")),
                     Tr(:class => row, Td(:class => jl, "Set{T}"), Td(:class => js_col, "Set")),
                     Tr(:class => row, Td(:class => jl, "struct"), Td(:class => js_col, "ES6 class")),

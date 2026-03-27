@@ -3517,14 +3517,16 @@ process.stdout.write(JSON.stringify(r));
     end
 
     # ─── ND Array tests (e2e via Node.js) ───
+    # ND arrays use nested JS arrays: zeros(3,4) → [[0,0,0,0],[0,0,0,0],[0,0,0,0]]
     @testset "ND: zeros(3,4)" begin
-        @test compile_unopt_and_run(() -> zeros(3, 4), "") == "[0,0,0,0,0,0,0,0,0,0,0,0]"
+        @test compile_unopt_and_run(() -> zeros(3, 4), "") == "[[0,0,0,0],[0,0,0,0],[0,0,0,0]]"
     end
     @testset "ND: ones(2,3)" begin
-        @test compile_unopt_and_run(() -> ones(2, 3), "") == "[1,1,1,1,1,1]"
+        @test compile_unopt_and_run(() -> ones(2, 3), "") == "[[1,1,1],[1,1,1]]"
     end
     @testset "ND: length(zeros(3,4))" begin
-        @test compile_unopt_and_run(() -> length(zeros(3, 4)), "") == "12"
+        # length = outer dimension (nrows) — use size for full shape
+        @test compile_unopt_and_run(() -> length(zeros(3, 4)), "") == "3"
     end
     @testset "ND: size(A,1)" begin
         @test compile_unopt_and_run(() -> size(zeros(3, 4), 1), "") == "3"
@@ -3535,8 +3537,8 @@ process.stdout.write(JSON.stringify(r));
     @testset "ND: A[i,j] set+get" begin
         @test compile_unopt_and_run(() -> begin A=zeros(2,3); A[1,2]=42.0; A[1,2] end, "") == "42"
     end
-    @testset "ND: column-major indexing" begin
-        @test compile_unopt_and_run(() -> begin A=zeros(2,3); A[2,1]=10.0; A[1,2]=20.0; A[2,2]=30.0; A end, "") == "[0,10,20,30,0,0]"
+    @testset "ND: nested array indexing" begin
+        @test compile_unopt_and_run(() -> begin A=zeros(2,3); A[2,1]=10.0; A[1,2]=20.0; A[2,2]=30.0; A end, "") == "[[0,20,0],[10,30,0]]"
     end
     @testset "ND: unrolled matmul" begin
         fn = () -> begin
@@ -3549,7 +3551,7 @@ process.stdout.write(JSON.stringify(r));
             C[2,2] = A[2,1]*B[1,2] + A[2,2]*B[2,2]
             return C
         end
-        @test compile_unopt_and_run(fn, "") == "[19,43,22,50]"
+        @test compile_unopt_and_run(fn, "") == "[[19,22],[43,50]]"
     end
     @testset "ND: nested loop sum" begin
         fn = () -> begin
@@ -3578,7 +3580,7 @@ process.stdout.write(JSON.stringify(r));
             end; end
             C
         end
-        # A*B = [[19,22],[43,50]], column-major flat = [19,43,22,50]
-        @test compile_unopt_and_run(fn, "") == "[19,43,22,50]"
+        # A*B = [[19,22],[43,50]]
+        @test compile_unopt_and_run(fn, "") == "[[19,22],[43,50]]"
     end
 end

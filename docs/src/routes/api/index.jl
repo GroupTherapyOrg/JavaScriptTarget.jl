@@ -120,16 +120,16 @@ end
 
         # ── ND Arrays ──
         H3(:class => "text-lg font-semibold text-warm-800 dark:text-warm-200 mt-6", "ND Arrays"),
-        P(:class => "text-sm text-warm-600 dark:text-warm-400", "Multi-dimensional arrays use flat JavaScript Arrays with ", Code(:class => "text-accent-500", "_size"), " metadata, stored in column-major order (matching Julia's memory layout)."),
+        P(:class => "text-sm text-warm-600 dark:text-warm-400", "Multi-dimensional arrays transpile to nested JavaScript arrays — the native format for JS libraries like Plotly, D3, and TensorFlow.js."),
         Div(:class => "overflow-x-auto",
             Table(:class => "w-full text-sm",
                 Thead(Tr(Th(:class => th_cls, "Julia"), Th(:class => th_cls, "JavaScript"))),
                 Tbody(
-                    Tr(:class => row, Td(:class => jl, "zeros(m,n), ones(m,n), fill(v,m,n)"), Td(:class => js_col, "jl_ndarray(val, [m,n])")),
-                    Tr(:class => row, Td(:class => jl, "A[i,j], A[i,j,k]"), Td(:class => js_col, "Column-major stride: A[(j-1)*m+(i-1)]")),
-                    Tr(:class => row, Td(:class => jl, "A[i,j] = val"), Td(:class => js_col, "Same stride for write")),
-                    Tr(:class => row, Td(:class => jl, "size(A), size(A,d)"), Td(:class => js_col, "A._size, A._size[d-1]")),
-                    Tr(:class => row, Td(:class => jl, "length(A)"), Td(:class => js_col, "A.length (total elements)"))
+                    Tr(:class => row, Td(:class => jl, "zeros(m,n), ones(m,n), fill(v,m,n)"), Td(:class => js_col, "Nested arrays: [[0,0],[0,0]]")),
+                    Tr(:class => row, Td(:class => jl, "A[i,j], A[i,j,k]"), Td(:class => js_col, "A[i-1][j-1], A[i-1][j-1][k-1]")),
+                    Tr(:class => row, Td(:class => jl, "A[i,j] = val"), Td(:class => js_col, "A[i-1][j-1] = val")),
+                    Tr(:class => row, Td(:class => jl, "size(A), size(A,d)"), Td(:class => js_col, "[A.length, A[0].length]")),
+                    Tr(:class => row, Td(:class => jl, "length(A)"), Td(:class => js_col, "A.length"))
                 )
             )
         ),
@@ -142,7 +142,7 @@ end
     end
     return A
 end
-# → jl_ndarray(0, [m,n]) with column-major indexing""")),
+# → [[2,3,4,...],[3,4,5,...],...]  (nested JS arrays)""")),
 
         # ── Higher-Order ──
         H3(:class => "text-lg font-semibold text-warm-800 dark:text-warm-200 mt-6", "Higher-Order Functions"),
@@ -274,7 +274,7 @@ js(\"console.log('value:', \\\$1)\", my_value)  # \$1 substituted with compiled 
                 Thead(Tr(Th(:class => th_cls, "Julia"), Th(:class => th_cls, "JavaScript"))),
                 Tbody(
                     Tr(:class => row, Td(:class => jl, "zeros(n), ones(n), fill(v,n)"), Td(:class => js_col, "new Array(n).fill(...)")),
-                    Tr(:class => row, Td(:class => jl, "zeros(m,n), ones(m,n), fill(v,m,n)"), Td(:class => js_col, "jl_ndarray(val, [m,n])"))
+                    Tr(:class => row, Td(:class => jl, "zeros(m,n), ones(m,n), fill(v,m,n)"), Td(:class => js_col, "jl_ndarray(val, [m,n]) → nested arrays"))
                 )
             )
         ),

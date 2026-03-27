@@ -938,11 +938,11 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
                     end
                     return "$(call_args[1])[($(call_args[2])) - 1]"
                 elseif length(call_args) == 3
-                    # A[i,j] → column-major flat index: (j-1)*nrows + (i-1)
-                    return "$(call_args[1])[(($(call_args[3]))-1)*$(call_args[1])._size[0]+(($(call_args[2]))-1)]"
+                    # A[i,j] → nested: A[i-1][j-1]
+                    return "$(call_args[1])[($(call_args[2]))-1][($(call_args[3]))-1]"
                 elseif length(call_args) == 4
-                    # A[i,j,k] → column-major: (k-1)*m*n + (j-1)*m + (i-1)
-                    return "$(call_args[1])[(($(call_args[4]))-1)*$(call_args[1])._size[0]*$(call_args[1])._size[1]+(($(call_args[3]))-1)*$(call_args[1])._size[0]+(($(call_args[2]))-1)]"
+                    # A[i,j,k] → nested: A[i-1][j-1][k-1]
+                    return "$(call_args[1])[($(call_args[2]))-1][($(call_args[3]))-1][($(call_args[4]))-1]"
                 end
                 return "[]"
             end
@@ -1108,15 +1108,15 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             end
             if fn_name == "setindex!" && length(call_args) >= 3
                 if length(call_args) == 4
-                    # A[i,j] = val → column-major
-                    return "($(call_args[1])[(($(call_args[4]))-1)*$(call_args[1])._size[0]+(($(call_args[3]))-1)] = $(call_args[2]))"
+                    # A[i,j] = val → nested: A[i-1][j-1] = val
+                    return "($(call_args[1])[($(call_args[3]))-1][($(call_args[4]))-1] = $(call_args[2]))"
                 else
                     return "($(call_args[1])[($(call_args[3]))-1] = $(call_args[2]))"
                 end
             end
             if fn_name == "getindex" && length(call_args) == 3
-                # A[i,j] → column-major
-                return "$(call_args[1])[(($(call_args[3]))-1)*$(call_args[1])._size[0]+(($(call_args[2]))-1)]"
+                # A[i,j] → nested: A[i-1][j-1]
+                return "$(call_args[1])[($(call_args[2]))-1][($(call_args[3]))-1]"
             end
             if fn_name == "copy" && length(call_args) >= 1
                 return "$(call_args[1]).slice()"
@@ -1174,9 +1174,11 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             # ─── Size (by name) ───
             if fn_name == "size"
                 if length(call_args) == 1
-                    return "($(call_args[1])._size||[$(call_args[1]).length]).slice()"
+                    # size(A) → [A.length, A[0].length, ...] for nested arrays
+                    return "(Array.isArray($(call_args[1])[0])?[$(call_args[1]).length,$(call_args[1])[0].length]:[$(call_args[1]).length])"
                 elseif length(call_args) == 2
-                    return "($(call_args[1])._size?$(call_args[1])._size[($(call_args[2]))-1]:$(call_args[1]).length)"
+                    # size(A, d) → walk d-1 levels of [0] then .length
+                    return "(($(call_args[2]))===1?$(call_args[1]).length:$(call_args[1])[0].length)"
                 end
             end
 
@@ -1388,8 +1390,8 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
             if length(call_args_gr) == 2
                 return "$(call_args_gr[1])[($(call_args_gr[2])) - 1]"
             elseif length(call_args_gr) == 3
-                # A[i,j] → column-major
-                return "$(call_args_gr[1])[(($(call_args_gr[3]))-1)*$(call_args_gr[1])._size[0]+(($(call_args_gr[2]))-1)]"
+                # A[i,j] → nested: A[i-1][j-1]
+                return "$(call_args_gr[1])[($(call_args_gr[2]))-1][($(call_args_gr[3]))-1]"
             end
         end
 
@@ -1397,8 +1399,8 @@ function compile_call(ctx::JSCompilationContext, expr::Expr)
         if bname === :setindex! && callee.mod === Base
             call_args_gr = [compile_value(ctx, a) for a in args[2:end]]
             if length(call_args_gr) == 4
-                # A[i,j] = val → column-major
-                return "($(call_args_gr[1])[(($(call_args_gr[4]))-1)*$(call_args_gr[1])._size[0]+(($(call_args_gr[3]))-1)] = $(call_args_gr[2]))"
+                # A[i,j] = val → nested: A[i-1][j-1] = val
+                return "($(call_args_gr[1])[($(call_args_gr[3]))-1][($(call_args_gr[4]))-1] = $(call_args_gr[2]))"
             elseif length(call_args_gr) == 3
                 return "($(call_args_gr[1])[($(call_args_gr[3]))-1] = $(call_args_gr[2]))"
             end
@@ -1865,10 +1867,10 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
                 arr_val = compile_value(ctx, expr.args[3])
                 val_val = compile_value(ctx, expr.args[4])
                 if length(expr.args) == 6
-                    # A[i,j] = val → column-major
+                    # A[i,j] = val → nested: A[i-1][j-1] = val
                     i_val = compile_value(ctx, expr.args[5])
                     j_val = compile_value(ctx, expr.args[6])
-                    return "($(arr_val)[(($(j_val))-1)*$(arr_val)._size[0]+(($(i_val))-1)] = $(val_val))"
+                    return "($(arr_val)[($(i_val))-1][($(j_val))-1] = $(val_val))"
                 else
                     idx_val = compile_value(ctx, expr.args[5])
                     return "($(arr_val)[($(idx_val))-1] = $(val_val))"
@@ -2019,12 +2021,12 @@ function compile_invoke(ctx::JSCompilationContext, expr::Expr)
         return "$(call_args[1]).length === 0"
     end
 
-    # size(A) → shape tuple, size(A, d) → dimension size
+    # size(A) → shape tuple, size(A, d) → dimension size (nested arrays)
     if func_name == "size"
         if length(call_args) == 1
-            return "($(call_args[1])._size||[$(call_args[1]).length]).slice()"
+            return "(Array.isArray($(call_args[1])[0])?[$(call_args[1]).length,$(call_args[1])[0].length]:[$(call_args[1]).length])"
         elseif length(call_args) == 2
-            return "($(call_args[1])._size?$(call_args[1])._size[($(call_args[2]))-1]:$(call_args[1]).length)"
+            return "(($(call_args[2]))===1?$(call_args[1]).length:$(call_args[1])[0].length)"
         end
     end
 
