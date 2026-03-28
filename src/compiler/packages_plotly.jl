@@ -65,7 +65,8 @@ function _plotly_plot_compiler(ctx, kwargs, pos_args)
         el_expr = "(typeof island!=='undefined'?island.querySelector('div[id]'):document.getElementById('therapy-plot'))"
     end
 
-    return "(function() { var _el = $(el_expr); if (_el && typeof Plotly !== 'undefined') { Plotly.react(_el, $(traces_js), $(layout_js), {responsive: true, displayModeBar: false}); } else if (_el) { var _s = document.createElement('script'); _s.src = 'https://cdn.plot.ly/plotly-2.35.2.min.js'; _s.onload = function() { Plotly.newPlot(_el, $(traces_js), $(layout_js), {responsive: true, displayModeBar: false}); }; document.head.appendChild(_s); } }())"
+    # Shared Plotly loader: first call loads CDN, subsequent calls queue until loaded
+    return """(function(){var _el=$(el_expr);if(!_el)return;function _draw(){Plotly.react(_el,$(traces_js),$(layout_js),{responsive:true,displayModeBar:false});}if(typeof Plotly!=='undefined'){_draw();}else{window._plotlyQ=window._plotlyQ||[];window._plotlyQ.push(_draw);if(!window._plotlyLoading){window._plotlyLoading=true;var s=document.createElement('script');s.src='https://cdn.plot.ly/plotly-2.35.2.min.js';s.onload=function(){for(var i=0;i<window._plotlyQ.length;i++)window._plotlyQ[i]();window._plotlyQ=[];};document.head.appendChild(s);}}})()"""
 end
 
 # ─── Registration function (called when a module that has these names is available) ───
